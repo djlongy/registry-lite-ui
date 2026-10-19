@@ -83,8 +83,6 @@ jobs:
       - name: Push the manifest list to ghcr.io
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE: ${{ steps.decide.outputs.release }}
-          VERSION: ${{ steps.decide.outputs.version }}
         run: |
           printf %s "$GH_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           # copying the archives straight to the registry keeps the config blob, and with it the HEALTHCHECK
@@ -93,11 +91,8 @@ jobs:
             skopeo copy --format v2s2 docker-archive:ui-$a.tar "docker://$IMAGE:$GITHUB_SHA-$a"
             podman manifest add ui "docker://$IMAGE:$GITHUB_SHA-$a"
           done
-          # latest moves with main only; a release adds X.Y.Z and X.Y
-          tags=("$GITHUB_SHA")
-          [ "$GITHUB_REF" = refs/heads/main ] && tags+=(latest)
-          if [ "$RELEASE" = true ]; then tags+=("$VERSION" "${VERSION%.*}"); fi
-          for t in "${tags[@]}"; do podman manifest push --format v2s2 ui "docker://$IMAGE:$t"; done
+          # only the sha tag moves here; the tags users pull move after the pushed image has passed
+          podman manifest push --format v2s2 ui "docker://$IMAGE:$GITHUB_SHA"
           skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | grep -E '"architecture"'
           # skopeo inspect --config hides the field, so read the config blob itself
           skopeo --override-os linux --override-arch arm64 copy "docker://$IMAGE:$GITHUB_SHA" dir:check
@@ -115,6 +110,17 @@ jobs:
           podman exec ui printenv APP_VERSION | grep -qx "$VERSION"
           podman exec ui printenv APP_REVISION | grep -qx "$GITHUB_SHA"
           podman image inspect "$IMAGE:$GITHUB_SHA" --format '{{.Digest}} {{.Architecture}}'
+      - name: Move the tags users pull
+        env:
+          RELEASE: ${{ steps.decide.outputs.release }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          # latest moves with main only; a release adds X.Y.Z and X.Y. Same manifest list, same digest.
+          tags=()
+          [ "$GITHUB_REF" = refs/heads/main ] && tags+=(latest)
+          if [ "$RELEASE" = true ]; then tags+=("$VERSION" "${VERSION%.*}"); fi
+          for t in "${tags[@]}"; do skopeo copy --all --preserve-digests "docker://$IMAGE:$GITHUB_SHA" "docker://$IMAGE:$t"; done
+          for t in "${tags[@]}"; do test "$(skopeo inspect --raw "docker://$IMAGE:$t" | sha256sum)" = "$(skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | sha256sum)"; done
       - name: Tag the release and create the GitHub Release
         if: steps.decide.outputs.release == 'true'
         env:
