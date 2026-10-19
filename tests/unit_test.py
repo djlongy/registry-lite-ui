@@ -86,6 +86,13 @@ class Copy(unittest.TestCase):
             R.move(c, "a/b", "t", "a/b", "u")
 
 
+class StaticFiles(unittest.TestCase):
+    def test_every_served_file_exists(self):
+        for path, (name, ctype) in S.FILES.items():
+            self.assertTrue((S.STATIC / name).is_file(), path)
+        self.assertEqual(S.FILES["/favicon.svg"][1], "image/svg+xml")
+
+
 class Csrf(unittest.TestCase):
     def setUp(self):
         self.cfg = S.Config({})
@@ -804,6 +811,48 @@ class Routes(unittest.TestCase):
             self.get["/api/tags"]({})
         self.assertEqual(self.get["/api/recent"]({"limit": ["-5"]})["events"], [])
         self.assertTrue(self.get["/api/config"]({})["deleteEnabled"])
+        # the pull host: the explicit setting, else the host:port of REGISTRY_URL
+        def host(env):
+            cfg = S.Config(env)
+            cfg.client = self.cfg.client
+            return S.routes(cfg)[0]["/api/config"]({})
+        self.assertEqual(host({"UI_REGISTRY_HOST": "docker.example.internal:5000"})["registryHost"], "docker.example.internal:5000")
+        self.assertTrue(host({"UI_REGISTRY_HOST": "docker.example.internal:5000"})["registryHostSet"])
+        fallback = host({"REGISTRY_URL": "https://registry.example:5443"})
+        self.assertEqual((fallback["registryHost"], fallback["registryHostSet"]), ("registry.example:5443", False))
+        for bad in ("https://x:5000", "x/y", "x y", "x:5000/"):
+            with self.assertRaises(ValueError):
+                S.Config({"UI_REGISTRY_HOST": bad})
+
+    def test_tagnames_groups_the_pollers_tags_by_repository(self):
+        self.cfg.state.tags = {"a/app:v2": {}, "a/app:v1": {}, "b:latest": {}}
+        self.assertEqual(self.get["/api/tagnames"]({}), {"repos": {"a/app": ["v1", "v2"], "b": ["latest"]}, "truncated": False})
+        S.MAX_TAGNAMES, cap = 2, S.MAX_TAGNAMES
+        try:
+            capped = self.get["/api/tagnames"]({})
+        finally:
+            S.MAX_TAGNAMES = cap
+        self.assertEqual(capped, {"repos": {"a/app": ["v1", "v2"]}, "truncated": True})
+
+    def test_parents_names_the_tagged_indexes_that_list_a_digest(self):
+        parents = self.get["/api/parents"]
+        child = parents({"repo": ["a/app"], "digest": [D("b")]})
+        self.assertEqual(child, {"parents": [{"tag": "latest", "platform": ""}, {"tag": "other", "platform": ""}], "more": 0})
+        self.assertEqual(parents({"repo": ["a/app"], "digest": [D("a")]}), {"parents": [], "more": 0})  # a tagged index has no parent
+        self.cfg.client.tags = lambda repo: [f"t{i}" for i in range(7)]  # at most five are named, the rest are counted
+        many = parents({"repo": ["a/app"], "digest": [D("b")]})
+        self.assertEqual(([p["tag"] for p in many["parents"]], many["more"]), (["t0", "t1", "t2", "t3", "t4"], 2))
+        for bad in ({"repo": ["a/app"], "digest": ["latest"]}, {"repo": ["A/app"], "digest": [D("b")]}, {"repo": ["a/app"]}):
+            with self.assertRaises(R.RegistryError, msg=bad):
+                parents(bad)
+
+    def test_manifest_without_tags_makes_no_tag_listing(self):
+        listed = []
+        self.cfg.client.tags = lambda repo: listed.append(repo) or ["latest"]
+        plain = self.get["/api/manifest"]({"repo": ["a/app"], "ref": ["latest"], "tags": ["0"]})
+        self.assertEqual((listed, "tags" in plain), ([], False))
+        full = self.get["/api/manifest"]({"repo": ["a/app"], "ref": ["latest"]})
+        self.assertEqual((listed, "tags" in full), (["a/app"], True))  # the default form still lists, for delete and move
 
     def test_manifest_views(self):
         idx = self.get["/api/manifest"]({"repo": ["a/app"], "ref": ["latest"]})

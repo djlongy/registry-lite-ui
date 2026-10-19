@@ -4,17 +4,26 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Registry</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header>
+  <button id="menu" type="button" aria-label="Toggle repository tree" aria-controls="side" aria-expanded="false">Menu</button>
   <a href="#/" id="home">Registry</a> <span id="reg"></span>
-  <nav><a href="#/recent" id="n-recent">Recent</a> <a href="#/repos" id="n-repos">Repositories</a></nav>
   <span id="live" class="mut"></span>
   <button id="prefs" type="button">Settings</button>
 </header>
 <div id="banner" hidden></div>
-<main id="main"></main>
+<div id="app">
+  <aside id="side">
+    <input id="filter" type="search" placeholder="Filter repositories" aria-label="Filter repositories" autocomplete="off" spellcheck="false">
+    <div id="tree" role="tree" aria-label="Repositories"></div>
+  </aside>
+  <div id="grip" role="separator" aria-orientation="vertical" aria-label="Resize the tree" tabindex="0"></div>
+  <main id="main"></main>
+</div>
+<div id="scrim"></div>
 <dialog id="dlg"><form method="dialog" id="form"></form></dialog>
 <script type="module" src="/app.js"></script>
 </body>

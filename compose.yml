@@ -27,6 +27,7 @@ services:
       REGISTRY_URL: http://registry:5000
       UI_ALLOWED_HOSTS: "${UI_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}"
       UI_READONLY: "${UI_READONLY:-false}"
+      UI_REGISTRY_HOST: "${UI_REGISTRY_HOST:-}"
       UI_POLL_INTERVAL: "${UI_POLL_INTERVAL:-30}"
       UI_STATE_DIR: /state
       UI_MAX_EVENTS: "${UI_MAX_EVENTS:-1000}"

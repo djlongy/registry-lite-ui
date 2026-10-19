@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import selectors
 import signal
@@ -22,7 +23,10 @@ import registry as R
 log = logging.getLogger("ui")
 
 STATIC = Path(__file__).parent / "static"
-FILES = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"), "/style.css": ("style.css", "text/css")}
+FILES = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"), "/style.css": ("style.css", "text/css"),
+         "/favicon.svg": ("favicon.svg", "image/svg+xml")}
+HOST_RE = re.compile(r"[A-Za-z0-9.-]+(:\d{1,5})?|\[[0-9A-Fa-f:]+\](:\d{1,5})?")
+MAX_TAGNAMES = 5000  # tag names /api/tagnames returns, so the answer stays small on a very large registry
 MAX_BODY = 4096  # bytes of JSON accepted on a POST
 HEALTHZ = "/healthz"
 HEADER_SECS, BODY_SECS = 10, 10  # whole-request limits against clients that send a byte at a time
@@ -39,6 +43,9 @@ class Config:
         self.client = R.Client(self.registry_url, env.get("REGISTRY_USER", ""), password,
                               env.get("REGISTRY_CA_FILE") or None)
         self.readonly = env.get("UI_READONLY", "").lower() in ("1", "true", "yes")
+        self.registry_host = env.get("UI_REGISTRY_HOST", "").strip()  # what clients type to reach the registry, shown in the pull and push commands
+        if self.registry_host and not HOST_RE.fullmatch(self.registry_host):
+            raise ValueError("UI_REGISTRY_HOST must be host or host:port, without a scheme or path")
         self.hosts = {h.strip().lower() for h in env.get("UI_ALLOWED_HOSTS", "").split(",") if h.strip()}
         self.csrf = hmac.new(secrets.token_bytes(32), b"csrf", hashlib.sha256).hexdigest()
         n = lambda key, default: int(env.get(key, default))  # noqa: E731
@@ -72,11 +79,15 @@ def descriptor(d):
     return {"digest": R.check_digest(d.get("digest")), "size": d["size"] if isinstance(d.get("size"), int) else None}
 
 
-def view_manifest(c, repo, ref):
+def view_manifest(c, repo, ref, with_tags=True):
+    """with_tags=False skips tags_of(), which lists the repository and HEADs every tag. The pane rows and the tag detail
+    use that form and work the shared tags out from the tag list they already hold; delete and move ask for the real list."""
     data, mtype, digest = c.manifest(repo, ref)
     m = R.json_load(data)
     out = {"repo": repo, "ref": ref, "digest": digest, "mediaType": mtype, "size": len(data),
-           "index": mtype in R.INDEX_TYPES, "tags": R.tags_of(c, repo, digest), "platforms": [], "layers": []}
+           "index": mtype in R.INDEX_TYPES, "platforms": [], "layers": []}
+    if with_tags:
+        out["tags"] = R.tags_of(c, repo, digest)
     for d in m.get("manifests", []):
         platform = d.get("platform") if isinstance(d.get("platform"), dict) else {}
         out["platforms"].append({**descriptor(d), **{k: str(platform[k]) for k in ("os", "architecture", "variant") if k in platform}})
@@ -160,6 +171,24 @@ def routes(cfg):
         return [{"tag": t, "digest": c.manifest(repo, t, head=True)[2], "changed": cfg.state.tags.get(f"{repo}:{t}", {}).get("changed")}
                 for t in sorted(c.tags(repo))]
 
+    def tagnames(q):  # tag names the poller has seen, so the filter can match tags without a tags call per repository
+        with cfg.state.cond:
+            refs = list(cfg.state.tags)  # copied under the lock, sorted and capped outside it
+        refs.sort()
+        out = {}
+        for ref in refs[:MAX_TAGNAMES]:
+            repo, _, tag = ref.rpartition(":")
+            out.setdefault(repo, []).append(tag)
+        return {"repos": out, "truncated": len(refs) > MAX_TAGNAMES}
+
+    def parents(q):  # the tagged indexes that list a digest as a child: what delete and move would refuse (409), shown up front
+        repo, digest = R.check_repo(one(q, "repo")), one(q, "digest")
+        if not R.DIGEST_RE.fullmatch(digest):
+            raise R.RegistryError(400, "digest expected")
+        found = R.survey(c, repo, digest)[0]
+        tags = sorted(found)
+        return {"parents": [{"tag": t, "platform": found[t]} for t in tags[:5]], "more": max(0, len(tags) - 5)}
+
     def recent(q):
         return cfg.state.snapshot(max(0, min(int(q.get("limit", ["200"])[0]), cfg.state.max_events)))
 
@@ -179,11 +208,15 @@ def routes(cfg):
 
     get = {
         "/api/config": lambda q: {"csrf": cfg.csrf, "readonly": cfg.readonly, "deleteEnabled": c.delete_enabled(),
-                                  "registry": cfg.registry_url},
+                                  "registry": cfg.registry_url,
+                                  "registryHost": cfg.registry_host or urllib.parse.urlsplit(cfg.registry_url).netloc,
+                                  "registryHostSet": bool(cfg.registry_host)},
         "/api/repos": lambda q: sorted(c.catalog()),
         "/api/tags": tags,
         "/api/recent": recent,
-        "/api/manifest": lambda q: view_manifest(c, one(q, "repo"), one(q, "ref")),
+        "/api/tagnames": tagnames,
+        "/api/parents": parents,
+        "/api/manifest": lambda q: view_manifest(c, one(q, "repo"), one(q, "ref"), q.get("tags", ["1"])[0] != "0"),
     }
     post = {
         "/api/copy": woken(lambda *a: {"digest": R.copy(c, *a)}),

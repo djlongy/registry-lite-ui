@@ -31,6 +31,7 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 | Optional | `UI_MAX_CONN`, `UI_MAX_SSE` | `64`, `20` | Concurrent connections and live-update clients. Extra connections are closed, extra live clients get 503. Keep `UI_MAX_CONN` at or below about 120: the 128 `pids_limit` also covers the main, poller, reaper, watchdog and shutdown threads and the health check. |
 | Optional | `LOG_LEVEL` | `info` | Python logging level. Logs go to stdout and stderr only. |
 | Optional | `UI_READONLY` | `false` | Hides and refuses copy, move and delete. |
+| Optional | `UI_REGISTRY_HOST` | host:port of `REGISTRY_URL` | The address clients use to reach the registry, for example `docker.example.internal:5000`. The pull, push and configure commands in the UI use it. `REGISTRY_URL` is often an internal name such as `registry:5000`, so set this when clients use a different one. Host or host:port only, no scheme. When unset the UI says so under the commands. |
 | Optional | `UI_ALLOWED_HOSTS` | any (compose: `localhost,127.0.0.1,[::1]`) | Comma separated `Host` allowlist, a DNS rebinding guard. Unset logs a warning. Set it to the name users type when the UI is not used from the same machine. The auth overrides require it. |
 | Optional | `UI_BIND`, `UI_PORT` / `REGISTRY_PORT` | `127.0.0.1`, `8080` / `5000` | Host address and ports in `compose.yml`. `UI_BIND` is the host publish address only: the UI is reachable from loopback only until it is set. |
 | Optional | `UI_LISTEN` | `0.0.0.0` | The address the UI process binds inside its container. Leave it unless you run the UI outside compose. |
@@ -40,6 +41,25 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 `docker compose up -d --build` (or `up -d` to pull the published image, see Image), open `http://localhost:8080`, and keep pushing and pulling against `registry.example.internal:5000` as before.
 
 For a registry that already runs as its own service, start the UI alone: `REGISTRY_URL=https://registry.example.internal:5000 podman compose -f compose.ui.yml up -d` (podman-compose 1.2 or newer, or `docker compose`). See [UI only](#ui-only).
+
+## Interface
+
+A repository browser in the style of Artifactory: a tree on the left, details on the right, and no page reloads.
+
+![tags](docs/screenshots/tags.png)
+
+- **Tree.** The registry is the root. Each `/` in a repository name makes a folder, so `lab/busybox-multiarch` is the folder `lab` holding `busybox-multiarch`. A repository opens to its tags, and a tag of a multi-arch image opens to its platforms. Tags and platforms are fetched when their parent first opens, and only open nodes are drawn, so a registry with a thousand repositories stays responsive. `Recent` sits above the registry. Clicking a row selects it and shows its detail, and only the chevron (or a double click) opens or closes it. The box at the top filters as you type, matching repository names, folder names and tag names. Tag names come from the poller's index (`GET /api/tagnames`), so a tag the poller has not seen yet is not matched, and a repository that matches only through a tag opens on its own when ten or fewer do. The bar between the panes resizes the tree, and at phone width the tree is a drawer behind the Menu button.
+- **Keys.** Up and Down move, Right opens (a second press moves to the first child), Left closes (a second press moves to the parent), Home and End jump, Enter selects. The tree is an ARIA `tree`.
+- **Detail.** A folder lists its children. A repository shows its tags with digest, platforms and the time the UI saw the change. Size and platforms need one manifest request per row, so they load by themselves for up to 20 rows and on a button press above that. Those requests, and the tag detail, pass `tags=0` so the server skips the lookup that lists the repository and checks every tag. Tags sharing a digest come from the tag list the pane already holds, and only the delete and move dialogs ask the server for the authoritative list. A tag shows `Image` (`host/repo:tag`) and `Pinned` (`host/repo@digest`) rows, a `Digest` row and a repository shows `host/repo`, each with a copy icon that copies the text alone. A tag or platform shows the manifest (digest, media type, sizes, layers, platforms, config os and arch) with Copy to..., Move to... and Delete. The delete dialog lists every tag that shares the digest. When the manifest is a child of a tagged index (a platform of `1.36`), the Delete and Move to... dialogs say so up front, with Confirm disabled, using `GET /api/parents`. The server still refuses it with a 409.
+- **Commands.** A repository or tag shows Pull, Push and Configure tabs with copyable commands: pull by tag and by digest, tag and push, trusting the registry certificate in `certs.d`, and login. A podman or docker switch, remembered in the browser, changes the tool and the `certs.d` path. The address in the commands is `UI_REGISTRY_HOST`, because `REGISTRY_URL` is often an internal name. When it is unset the UI uses the host and port of `REGISTRY_URL` and says so. At repository level the tag is the placeholder `<TAG>`. Copy uses the clipboard API where the page is on `localhost` or HTTPS, and otherwise selects the text so Ctrl+C works.
+- **Links.** `#/repo/<name>`, `#/repo/<name>:<tag>`, `#/repo/<name>:<tag>@<digest>` (one platform), `#/dir/<folder>`, `#/recent` and `#/` (the registry). Back and forward work, and a reload returns to the same node.
+- **Live.** Pushes and deletes arrive over the event stream and change the tree in place. New and changed nodes flash for four seconds, and open nodes and the selection stay as they are.
+- **Remembered in the browser.** Open nodes, the selected node and the tree width, with the settings below.
+
+![tags, dark](docs/screenshots/tags-dark.png)
+![push commands](docs/screenshots/push.png)
+![configure commands, dark](docs/screenshots/configure-dark.png)
+![phone](docs/screenshots/phone.png)
 
 ## Image
 
@@ -78,7 +98,7 @@ podman compose -f compose.ui.yml up -d
 |---|---|
 | `compose.yml` | `registry:2` published on 5000 exactly as before, plus the UI on 8080, plus two GC jobs behind `profiles: [gc]`. |
 | `app/registry.py` | A 200-line stdlib client for the registry HTTP API with name validation and the copy, move and delete logic. It never touches registry storage. |
-| `app/server.py` | A `http.server` app that serves three static files, a JSON API and a Server-Sent Events stream, with CSRF checks, connection caps and logging to stdout. |
+| `app/server.py` | A `http.server` app that serves four static files, a JSON API and a Server-Sent Events stream, with CSRF checks, connection caps and logging to stdout. |
 | `app/poller.py` | A thread that polls the registry's own API for tag and digest changes and keeps a capped event history in memory, optionally in one JSON file. It never talks to anything but the registry. |
 | `app/static/` | Vanilla HTML, CSS and JS with no build step. Data is rendered with `textContent`, never `innerHTML`, and the theme is a class set by same-origin JS under a strict CSP. |
 | `Containerfile` | `ubi9/python-312-minimal` pinned by digest, uid 65534, no pip installs. |
@@ -98,7 +118,7 @@ Most registry UIs (joxit/docker-registry-ui behind nginx, and similar) proxy `/v
 | Feature | Registry API |
 |---|---|
 | Recent changes | The poller walks `GET /v2/_catalog` and tag lists (`HEAD` on each manifest for its digest) and records new, retagged and deleted tags with the time it saw them. The registry API has no push timestamps and the image config `created` is build time, so Recent shows when the UI saw a change, not when it was pushed or built. Pushes made before the UI started watching are not in the history. |
-| Live view | `GET /api/events` is a Server-Sent Events stream with a heartbeat every 15 s. The page refreshes on each change, pauses while a dialog is open or the tab is hidden, and falls back to polling `/api/recent` when the stream is down. |
+| Live view | `GET /api/events` is a Server-Sent Events stream with a heartbeat every 15 s. Each change updates the tree in place and refreshes the detail pane (held back while a dialog is open or the tab is hidden), and the page falls back to polling `/api/recent` when the stream is down. |
 | Catalog, tags | `GET /v2/_catalog`, `GET /v2/<name>/tags/list` (follows `Link` pages) |
 | Manifest detail | `GET /v2/<name>/manifests/<ref>`, config blob for os and arch. Shows digest, size, layers, platforms of an index. |
 | Copy | For an index, each child manifest first. Per image, `POST /v2/<dst>/blobs/uploads/?mount=<digest>&from=<src>` for config and layers, then `PUT /v2/<dst>/manifests/<tag>` with the original bytes, so the digest is unchanged. If a mount is refused the blob is streamed instead. |
@@ -111,9 +131,10 @@ Most registry UIs (joxit/docker-registry-ui behind nginx, and similar) proxy `/v
 ![copy](docs/screenshots/copy-dialog.png)
 ![delete](docs/screenshots/delete-confirm.png)
 ![delete, dark](docs/screenshots/delete-confirm-dark.png)
+![settings](docs/screenshots/settings.png)
 ![settings, dark](docs/screenshots/settings-dark.png)
 
-Settings (theme light, dark or system, landing page, sort order, auto-refresh, page size) are kept in the browser's `localStorage` and nothing else is stored there. The page works with storage blocked.
+Settings (a panel opened from the header, with changes applied as you make them and a Reset to defaults button: theme light, dark or system, podman or docker for the commands, sort order of lists, rows per page, auto-refresh and the fallback poll interval) and the tree state (open nodes, selected node, tree width) are kept in the browser's `localStorage` and nothing else is stored there. The page works with storage blocked.
 
 Registry notifications were evaluated and left out. They would give exact push times, but the registry holds events for a down endpoint in an unbounded in-memory queue (`notifications/sinks.go`, v2.8.3). With the endpoint refusing connections, 50000 pushes got slower (3.7 ms to 7.6 ms each) and the registry used 220 MiB more memory than the same run without notifications (`tests/evidence/notifications.txt`, `tests/notify_probe.py`). It never blocked a push, but the UI being down must not cost the registry anything, so the poller is the only source.
 
