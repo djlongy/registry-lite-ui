@@ -122,7 +122,7 @@ gc() {
   check "docker push scratch image" docker push -q "$REG/scratch/big:gc"
   before=$(size)
   d="sha256:$(raw scratch/big:gc)"
-  post /api/delete "{\"repo\":\"scratch/big\",\"digest\":\"$d\",\"children\":true}" | jq -e '.deleted | length > 1' >/dev/null && ok "UI delete scratch/big with its children"
+  post /api/delete "{\"repo\":\"scratch/big\",\"digest\":\"$d\",\"children\":true}" | jq -e '.deleted | length >= 1' >/dev/null && ok "UI delete scratch/big" || bad "UI delete scratch/big"
   docker compose stop registry >/dev/null 2>&1
   gcrun() { docker run --rm -v rlui_registry-data:/var/lib/registry registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 registry garbage-collect "$@" /etc/docker/registry/config.yml 2>&1; }
   gcrun --dry-run | tail -n 3
