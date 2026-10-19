@@ -31,8 +31,17 @@ IMAGE_TYPES = {
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
 }
+IMAGE_CONFIGS = {"application/vnd.docker.container.image.v1+json", "application/vnd.oci.image.config.v1+json"}
+HELM_CONFIG = "application/vnd.cncf.helm.config.v1+json"
 ACCEPT = ", ".join(sorted(INDEX_TYPES | IMAGE_TYPES))
 DELETE_OFF = "Deletion is disabled on this registry. Set REGISTRY_STORAGE_DELETE_ENABLED=true and restart it."
+
+
+def kind_of(config_type):
+    """image (also an index or an unknown manifest), helm or artifact, from the media type of a manifest's config."""
+    if not config_type or config_type in IMAGE_CONFIGS:
+        return "image"
+    return "helm" if config_type == HELM_CONFIG else "artifact"
 
 
 class RegistryError(Exception):
@@ -185,7 +194,7 @@ def local_path(url):
 def json_load(data):
     try:
         obj = json.loads(data or b"{}")
-    except ValueError:
+    except (ValueError, RecursionError):  # a manifest nested thousands of levels deep
         raise RegistryError(502, "registry returned invalid JSON")
     if not isinstance(obj, dict):
         raise RegistryError(502, "registry returned unexpected JSON")

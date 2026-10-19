@@ -287,7 +287,9 @@ class FakeRegistry:
         return list(self.repos[r])
 
     def manifest(self, r, t, head=False):
-        self.heads += 1
+        self.heads += head
+        if not head:  # a read by digest, for the kind
+            return b"{}", "", t
         return b"", "", self.repos[r][t]
 
 
@@ -315,6 +317,78 @@ class PollerTests(unittest.TestCase):
         del reg.repos["a"]
         p.cycle()
         self.assertEqual(sorted((e["type"], e["ref"]) for e in st.events), [("deleted", "a:1"), ("deleted", "a:2"), ("new", "a:2"), ("retagged", "a:1")])
+
+    def test_records_index_and_kind_once_per_digest(self):
+        helm = '{"config":{"mediaType":"application/vnd.cncf.helm.config.v1+json"}}'
+        image = '{"config":{"mediaType":"application/vnd.oci.image.config.v1+json"}}'
+        other = '{"config":{"mediaType":"application/vnd.example.thing.v1+json"}}'
+        bodies = {D("1"): (image, IMG), D("2"): (helm, IMG), D("3"): (other, IMG), D("4"): ("{}", IDX)}
+
+        class Reg(FakeRegistry):
+            gets = []
+
+            def manifest(self, r, t, head=False):
+                if t.startswith("sha256:"):
+                    self.gets.append(t)
+                    return bodies[t][0].encode(), bodies[t][1], t
+                return b"", bodies[self.repos[r][t]][1], self.repos[r][t]
+        reg = Reg({"a": {"image": D("1"), "chart": D("2"), "art": D("3"), "multi": D("4"), "alias": D("1")}})
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st, max_tags=100)
+        p.cycle()
+        self.assertEqual({d: (v["index"], v["kind"]) for d, v in st.meta.items()},
+                         {D("1"): (False, "image"), D("2"): (False, "helm"), D("3"): (False, "artifact"), D("4"): (True, "image")})
+        self.assertEqual(sorted(reg.gets), [D("1"), D("2"), D("3")])  # an index and a repeated digest are not read
+        p.cycle()
+        self.assertEqual(len(reg.gets), 3)  # known digests are never read again
+
+    def test_unreadable_manifest_is_tried_again_next_cycle(self):
+        class Reg(FakeRegistry):
+            bad = True
+
+            def manifest(self, r, t, head=False):
+                if t.startswith("sha256:"):
+                    if self.bad:
+                        raise R.RegistryError(500, "boom")
+                    return b'{"config":{"mediaType":"application/vnd.cncf.helm.config.v1+json"}}', IMG, t
+                return b"", IMG, self.repos[r][t]
+        reg = Reg({"a": {"t": D("1")}})
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st)
+        p.cycle()
+        self.assertEqual((st.meta, len(st.tags)), ({}, 1))
+        reg.bad = False
+        p.cycle()
+        self.assertEqual(st.traits(D("1")), {"index": False, "kind": "helm"})
+
+    def test_hostile_manifest_does_not_stall_the_poller(self):
+        deep = b"[" * 100000  # nested far past the recursion limit
+        class Reg(FakeRegistry):
+            gets = 0
+
+            def manifest(self, r, t, head=False):
+                if t.startswith("sha256:"):
+                    self.gets += 1
+                    return deep, IMG, t
+                return b"", IMG, self.repos[r][t]
+        reg = Reg({"a": {"bad": D("1"), "ok": D("2")}})
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st)
+        p.cycle()
+        self.assertEqual(len(st.tags), 2)  # the cycle finished
+        self.assertEqual(st.traits(D("1")), {"index": False, "kind": "artifact"})
+        p.cycle()
+        self.assertEqual(reg.gets, 2)  # each digest was read once, the unreadable one is not retried
+        with self.assertRaises(R.RegistryError):
+            R.json_load(deep)
+
+    def test_meta_is_saved_and_loaded(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        st = P.State(os.path.join(d, "state.json"), clock=Clock())
+        st.learn(D("1"), False, "helm")
+        st.save(force=True)
+        self.assertEqual(P.State(os.path.join(d, "state.json"), clock=Clock()).traits(D("1")), {"index": False, "kind": "helm"})
 
     def test_poller_survives_errors(self):
         class Down(FakeRegistry):
@@ -820,6 +894,9 @@ class Routes(unittest.TestCase):
         self.assertEqual(self.get["/api/repos"]({}), ["a/app", "b/app"])
         tags = self.get["/api/tags"]({"repo": ["a/app"]})
         self.assertEqual([t["tag"] for t in tags], ["latest", "other"])
+        self.assertEqual([(t["index"], t["kind"]) for t in tags], [(True, None), (True, None)])  # FakeClient answers every ref with the index
+        self.cfg.state.learn(D("a"), True, "image")
+        self.assertEqual(self.get["/api/tags"]({"repo": ["a/app"]})[0]["kind"], "image")
         with self.assertRaises(R.RegistryError):
             self.get["/api/tags"]({})
         self.assertEqual(self.get["/api/recent"]({"limit": ["-5"]})["events"], [])

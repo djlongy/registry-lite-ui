@@ -8,8 +8,11 @@ import threading
 import time
 from collections import deque
 
+import registry as R
+
 log = logging.getLogger("poller")
 MAX_STATE_BYTES = 8 << 20  # a state file over this is neither written nor read
+KINDS = ("image", "helm", "artifact")
 
 
 def diff(old, new, now):
@@ -31,6 +34,9 @@ def well_formed(data):
             and num(data.get("since")) and isinstance(data.get("tags"), dict) and isinstance(data.get("events"), list)
             and all(isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("digest"), str)
                     and num(v.get("changed")) and num(v.get("first")) for k, v in data["tags"].items())
+            and isinstance(data.get("meta", {}), dict)
+            and all(isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("index"), bool) and v.get("kind") in KINDS
+                    for k, v in data.get("meta", {}).items())
             and all(isinstance(e, dict) and isinstance(e.get("ref"), str) and num(e.get("t")) and isinstance(e.get("seq"), int)
                     and e.get("type") in ("new", "retagged", "deleted") for e in data["events"]))
 
@@ -60,6 +66,7 @@ class State:
     def __init__(self, path=None, max_events=1000, max_age=30 * 86400, save_every=30, clock=time.time):
         self.path, self.max_events, self.max_age, self.save_every, self.clock = path, max_events, max_age, save_every, clock
         self.tags, self.events, self.seq, self.baselined = {}, deque(), 0, False
+        self.meta = {}  # digest to {"index": bool, "kind": image|helm|artifact}, read once per digest, which never changes
         self.empty = set()  # repositories a full walk found with no tags. In memory only, so unknown again after a restart.
         self.since = clock()
         self.cond = threading.Condition()
@@ -87,10 +94,27 @@ class State:
                     self.seq += 1
                     self.events.append({**e, "seq": self.seq})
             self.prune(now)
+            if len(self.meta) > 2 * len(self.tags) + 1000:  # digests of deleted tags, once there are many
+                keep = {v["digest"] for v in self.tags.values()}
+                self.meta = {d: v for d, v in self.meta.items() if d in keep}
             self.dirty = self.dirty or bool(ev)
             if ev and self.baselined:
                 self.cond.notify_all()
         return ev
+
+    def known(self, digest):
+        with self.cond:
+            return digest in self.meta
+
+    def learn(self, digest, index, kind):
+        with self.cond:
+            self.meta[digest] = {"index": index, "kind": kind}
+            self.dirty = True
+
+    def traits(self, digest):
+        """What is known about a manifest digest, or {}."""
+        with self.cond:
+            return dict(self.meta.get(digest, {}))
 
     def mark_baselined(self):
         with self.cond:
@@ -117,7 +141,7 @@ class State:
 
     def dump(self):
         return json.dumps({"v": 1, "since": self.since, "baselined": self.baselined, "seq": self.seq,
-                           "tags": self.tags, "events": list(self.events)}, sort_keys=True, separators=(",", ":"))
+                           "tags": self.tags, "meta": self.meta, "events": list(self.events)}, sort_keys=True, separators=(",", ":"))
 
     def save(self, force=False, wait=-1):
         """Write the state atomically, only if it changed and not more often than save_every.
@@ -175,6 +199,7 @@ class State:
             if not well_formed(data):
                 raise ValueError("unexpected structure")
             self.tags, self.seq, self.baselined = data["tags"], data["seq"], data["baselined"]
+            self.meta = data.get("meta", {})
             self.since = data["since"]
             self.events = deque(data["events"])
             self.prune(self.clock())
@@ -183,7 +208,7 @@ class State:
             pass
         except (ValueError, KeyError, TypeError, OSError) as e:
             log.warning("ignoring unreadable state file: %s", e)
-            self.tags, self.events, self.seq, self.baselined = {}, deque(), 0, False
+            self.tags, self.events, self.seq, self.baselined, self.meta = {}, deque(), 0, False, {}
 
 
 class Poller(threading.Thread):
@@ -201,6 +226,25 @@ class Poller(threading.Thread):
     def wake(self):
         self.kick.set()
 
+    def learn(self, r, mtype, digest):
+        """Record whether a digest is an index, and its kind. The kind needs a read of the manifest, once per digest."""
+        if not digest or self.state.known(digest):
+            return
+        index = mtype in R.INDEX_TYPES
+        kind = "image"
+        if not index:
+            try:
+                data = self.client.manifest(r, digest)[0]
+            except R.RegistryError:  # not read this time, tried again next cycle
+                return
+            try:
+                config = R.json_load(data).get("config")
+                kind = R.kind_of(config.get("mediaType") if isinstance(config, dict) else None)
+            except (R.RegistryError, RecursionError, AttributeError) as e:  # a digest names its content, so it stays unreadable: do not retry it
+                self.throttle.error("manifest", f"cannot read manifest {digest}: {getattr(e, 'message', e)}")
+                kind = "artifact"
+        self.state.learn(digest, index, kind)
+
     def scan(self, r, budget):
         """Check up to `budget` more tags of r. Returns (digests by ref, tags checked), or None while r is unfinished."""
         tags = sorted(self.client.tags(r))
@@ -208,7 +252,8 @@ class Poller(threading.Thread):
         done = done if name == r else {}
         todo = [t for t in tags if t not in done][:budget]
         for t in todo:
-            done[t] = self.client.manifest(r, t, head=True)[2]
+            _, mtype, done[t] = self.client.manifest(r, t, head=True)
+            self.learn(r, mtype, done[t])
             self.last_tick = time.monotonic()  # progress, so a slow registry is not mistaken for a stall
         self.partial = (r, done)
         if any(t not in done for t in tags):

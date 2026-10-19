@@ -80,6 +80,7 @@ const ICONS = {
   close: [["s", "M4 4l8 8M12 4l-8 8"]],
   arrow: [["s", "M8 12.5v-9M4.5 7L8 3.5 11.5 7"]],
   chart: [["s", "M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 6.4a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2zM8 1.8v4.6M8 9.6v4.6M2.6 4.9l4 2.3M9.4 8.8l4 2.3M2.6 11.1l4-2.3M9.4 7.2l4-2.3"]],
+  box: [["s", "M3 3h10v10H3z"]],
   artifact: [["s", "M8 1.8l5.5 3v6.4L8 14.2l-5.5-3V4.8zM2.5 4.8L8 7.8l5.5-3M8 7.8v6.4"]],
   clock: [["s", "M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zM8 4.8V8l2.2 1.4"]],
 };
@@ -240,7 +241,7 @@ const visibleKids = (n) => folderKids(n).filter((k) => !isHidden(k));
 function expandable(n) {
   if (n.kind === "root") return true;
   if (n.kind === "node") return n.kids.size > 0 || n.repo;
-  if (n.kind === "tag") return n.plats === null || n.plats.length > 0;
+  if (n.kind === "tag") return n.index !== false && (n.plats === null || n.plats.length > 0); // a tag that is not an index has no platforms to show
   return false;
 }
 const folderLike = (n) => n.kind === "root" || (n.kind === "node" && !n.repo && n.kids.size > 0);
@@ -312,7 +313,7 @@ function dropTag(t) {
 function upsertTag(n, r, flashChanges) {
   let t = n.tagMap.get(r.tag);
   if (!t) {
-    t = mk("tag", `t:${n.path}:${r.tag}`, r.tag, n, { tag: r.tag, digest: r.digest, changed: r.changed, plats: null });
+    t = mk("tag", `t:${n.path}:${r.tag}`, r.tag, n, { tag: r.tag, digest: r.digest, changed: r.changed, index: r.index, akind: r.kind, plats: null });
     n.tagMap.set(r.tag, t);
     if (flashChanges) flash(t);
   } else if (t.digest !== r.digest) {
@@ -320,7 +321,7 @@ function upsertTag(n, r, flashChanges) {
     Object.assign(t, { digest: r.digest, plats: null });
     if (flashChanges) flash(t);
   }
-  t.changed = r.changed;
+  Object.assign(t, { changed: r.changed, index: r.index, akind: r.kind }); // what the tag list says is right on first render, before any manifest is read
 }
 function reconcileTags(n, rows, flashChanges) {
   const seen = new Set(rows.map((r) => r.tag));
@@ -406,7 +407,7 @@ function rowEl(r) {
   if (r.info) return el("div", { className: "row info", role: "none" }, ...guides, el("span", { className: "chev" }), el("span", { className: "lbl", textContent: r.info }));
   const open = expandable(n) && isOpen(n);
   const row = el("div", {
-    className: "row", role: "treeitem", id: "ti-" + n.id, tabIndex: n.id === tree.focus ? 0 : -1, title: rowTitle(n),
+    className: "row", role: "treeitem", id: "ti-" + n.id, tabIndex: n.id === tree.focus ? 0 : -1,
     "aria-level": r.depth + 1, "aria-posinset": r.pos, "aria-setsize": r.count, "aria-selected": String(n.id === tree.sel),
   }, ...guides, el("span", { className: "chev" }, expandable(n) ? icon("chev") : null), iconFor(n, open), el("span", { className: "lbl", textContent: rowLabel(n) }));
   row.dataset.id = n.id;
@@ -479,6 +480,13 @@ function toggle(n, force) {
   renderTree();
 }
 const rowOf = (target) => target.closest(".row[data-id]");
+// The full path is a tooltip only while the label is cut off, so it never covers the row above for a name that fits.
+$("tree").addEventListener("mouseover", (e) => {
+  const row = rowOf(e.target), n = row && tree.byId.get(row.dataset.id), lbl = row?.querySelector(".lbl");
+  if (!n || !lbl) return;
+  if (lbl.scrollWidth > lbl.clientWidth) row.title = rowTitle(n);
+  else row.removeAttribute("title");
+});
 $("tree").addEventListener("click", (e) => {
   const row = rowOf(e.target);
   if (!row) return;
@@ -788,8 +796,8 @@ function artifactKind(m) {
   if (!type || IMAGE_CONFIGS.has(type)) return "image";
   return type === HELM_CONFIG ? "helm" : "artifact";
 }
-const tagKind = (t) => artifactKind(loadedManifest(t));
-const KIND_ICON = { image: ["whale", "whale"], helm: ["chart", "chart"], artifact: ["artifact", ""] };
+const tagKind = (t) => { const m = loadedManifest(t); return m ? artifactKind(m) : t.akind || "unknown"; }; // unknown until the poller has read it
+const KIND_ICON = { image: ["whale", "whale"], helm: ["chart", "chart"], artifact: ["artifact", ""], unknown: ["box", ""] };
 const kindIcon = (kind) => icon(...KIND_ICON[kind]);
 const KIND_LABEL = { image: "Container image", helm: "Helm chart", artifact: "OCI artifact" };
 const createdMs = (m) => (m?.created ? Date.parse(m.created) : Number.NaN);
@@ -975,7 +983,7 @@ function detailCells(m) {
   return [m.platform ? `${m.platform.os}/${m.platform.architecture}` : "", size(layersTotal(m))];
 }
 function repoKind(n) { // a repository of charts or artifacts, as far as the loaded tags tell
-  return n.tagList.map((t) => tagKind(t)).find((k) => k !== "image") || "image";
+  return n.tagList.map((t) => tagKind(t)).find((k) => k !== "image" && k !== "unknown") || "image";
 }
 const trimSlash = (p) => (p.endsWith("/") ? p.slice(0, -1) : p);
 // A volume name is not a path: relative to the current directory it could delete the wrong thing, so ask the tool where the volume is.
@@ -1312,7 +1320,7 @@ function confirmDelete(o) {
         el("p", { className: "scope", textContent: `Deletes this manifest from ${o.repo} only. Other repositories${suchAs}, are not affected, even if they hold the same image.` }),
         el("div", { className: "xlabel", textContent: "Tags removed with it" }),
         el("div", { className: "tagchips" }, ...(m.tags.length ? m.tags.map((t) => el("span", { className: "tagchip", textContent: t })) : [el("span", { className: "mut", textContent: "none, this digest has no tag" })])),
-        ...(isIndex ? [el("div", { className: "srow" }, el("div", {}, el("div", { className: "slabel", id: "d-sw", textContent: "Also delete platform images" }),
+        ...(isIndex ? [el("div", { className: "srow" }, switchLabel(sw, el("div", { className: "slabel", id: "d-sw", textContent: "Also delete platform images" }),
           el("div", { className: "sdesc", textContent: removable ? `Index children that no other tag in this repository uses. ${removable} of ${o.info.children} would be removed.` : "Every child is used by another tag in this repository, so none would be removed." })), el("div", { className: "sctl" }, sw))] : []),
         el("p", { className: "mut", textContent: "Disk space is freed by garbage collection, not by this action." }), script),
       el("div", { className: "sfoot" }, el("button", { type: "button", textContent: "Cancel", onclick: () => dlg.close() }), go));
@@ -1610,6 +1618,8 @@ function switchEl(labelId, key, apply) {
   b.draw();
   return b;
 }
+// The label text of a switch row flips the switch too. The button keeps role=switch, so Space and Enter still work on it.
+const switchLabel = (sw, ...kids) => el("div", { className: "tap", onclick: () => { if (!sw.disabled) sw.click(); } }, ...kids);
 function selectEl(labelId, key, values, text, apply) {
   const sel = el("select", { "aria-labelledby": labelId, onchange: () => apply({ [key]: +sel.value }) }, ...values.map((v) => el("option", { value: String(v), textContent: text(v) })));
   const wrap = el("span", { className: "selwrap" }, sel, icon("chev"));
@@ -1642,7 +1652,8 @@ function settings() {
   };
   const row = (id, label, desc, control) => {
     controls.push(control);
-    return el("div", { className: "srow" }, el("div", {}, el("div", { className: "slabel", id, textContent: label }), el("div", { className: "sdesc", textContent: desc })), el("div", { className: "sctl" }, control));
+    const text = [el("div", { className: "slabel", id, textContent: label }), el("div", { className: "sdesc", textContent: desc })];
+    return el("div", { className: "srow" }, control.getAttribute?.("role") === "switch" ? switchLabel(control, ...text) : el("div", {}, ...text), el("div", { className: "sctl" }, control));
   };
   const section = (title, ...rows) => el("section", {}, el("h3", { className: "ssec", textContent: title }), ...rows);
   const pollCtl = selectEl("s-poll", "interval", CHOICES.interval, (v) => v + " s", apply);

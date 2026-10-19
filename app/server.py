@@ -201,8 +201,13 @@ def routes(cfg):
 
     def tags(q):
         repo = one(q, "repo")
-        return [{"tag": t, "digest": c.manifest(repo, t, head=True)[2], "changed": cfg.state.tags.get(f"{repo}:{t}", {}).get("changed")}
-                for t in sorted(c.tags(repo))]
+        rows = []
+        for t in sorted(c.tags(repo)):
+            _, mtype, digest = c.manifest(repo, t, head=True)
+            row = {"tag": t, "digest": digest, "changed": cfg.state.tags.get(f"{repo}:{t}", {}).get("changed"), "index": mtype in R.INDEX_TYPES}
+            kind = cfg.state.traits(digest).get("kind")  # null until the poller has read the manifest
+            rows.append({**row, "kind": kind})
+        return rows
 
     def tagnames(q):  # tag names the poller has seen, so the filter can match tags without a tags call per repository
         with cfg.state.cond:
