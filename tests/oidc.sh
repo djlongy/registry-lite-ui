@@ -2,7 +2,7 @@
 # Logs in through oauth2-proxy and a throwaway dex. Run from the repo root with docker working.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-export UI_PORT=8088 OIDC_ISSUER_URL=http://dex:5556/dex OIDC_CLIENT_ID=registry-ui OIDC_CLIENT_SECRET=test-client-secret \
+export UI_PORT=8088 UI_ALLOWED_HOSTS=localhost OIDC_EMAIL_DOMAINS=example.internal OIDC_ISSUER_URL=http://dex:5556/dex OIDC_CLIENT_ID=registry-ui OIDC_CLIENT_SECRET=test-client-secret \
   OIDC_COOKIE_SECRET=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_') OIDC_REDIRECT_URL=http://localhost:8088/oauth2/callback OIDC_COOKIE_SECURE=false
 docker compose -f compose.yml -f compose.oidc.yml -f tests/oidc/compose.dex.yml up -d >/dev/null 2>&1
 sleep 8

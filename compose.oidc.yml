@@ -6,6 +6,8 @@ x-logging: &logging
 services:
   ui:
     ports: !reset []
+    environment:
+      UI_ALLOWED_HOSTS: "${UI_ALLOWED_HOSTS:?set UI_ALLOWED_HOSTS to the host name users type in the browser}"
   ui-auth:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5@sha256:8498b0d0ef0a7b29686414000a08aee467f02d0299c9ed1e006a8f33fc017916
     ports: ["${UI_PORT:-8080}:4180"]
@@ -18,8 +20,10 @@ services:
       OAUTH2_PROXY_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}
       OAUTH2_PROXY_COOKIE_SECRET: ${OIDC_COOKIE_SECRET:?set OIDC_COOKIE_SECRET}
       OAUTH2_PROXY_REDIRECT_URL: ${OIDC_REDIRECT_URL:?set OIDC_REDIRECT_URL}
-      OAUTH2_PROXY_EMAIL_DOMAINS: "${OIDC_EMAIL_DOMAINS:-*}"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "${OIDC_EMAIL_DOMAINS:?set OIDC_EMAIL_DOMAINS, for example example.internal ('*' admits every account the issuer vouches for)}"
+      OAUTH2_PROXY_ALLOWED_GROUPS: "${OIDC_ALLOWED_GROUPS:-}"
       OAUTH2_PROXY_COOKIE_SECURE: "${OIDC_COOKIE_SECURE:-true}"
+      OAUTH2_PROXY_COOKIE_SAMESITE: lax
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
     logging: *logging

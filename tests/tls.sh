@@ -3,7 +3,7 @@
 # Needs openssl, skopeo, curl. COLIMA_PROFILE=<name> installs the docker CA inside that Colima VM, otherwise sudo is used.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-export REGISTRY_PORT=${REGISTRY_PORT:-5050} UI_PORT=${UI_PORT:-8088} COMPOSE_PROJECT_NAME=rlui
+export REGISTRY_PORT=${REGISTRY_PORT:-5050} UI_PORT=${UI_PORT:-8088} COMPOSE_PROJECT_NAME=rlui UI_ALLOWED_HOSTS=localhost
 WORK=$(mktemp -d "$PWD/.tlswork.XXXXXX")   # under the repo so a Colima VM can mount it
 trap 'find "$WORK" -delete' EXIT
 H=docker.example.internal
@@ -71,7 +71,7 @@ docker compose "${B[@]}" up -d >/dev/null 2>&1; sleep 4
 refused "proxy refuses plain HTTP" curl -fsS "http://localhost:$UI_PORT/api/repos"
 
 echo "== rendered config for the OIDC TLS override (not started)"
-OIDC_ISSUER_URL=x OIDC_CLIENT_ID=x OIDC_CLIENT_SECRET=x OIDC_COOKIE_SECRET=x OIDC_REDIRECT_URL=x \
+OIDC_EMAIL_DOMAINS=x OIDC_ISSUER_URL=x OIDC_CLIENT_ID=x OIDC_CLIENT_SECRET=x OIDC_COOKIE_SECRET=x OIDC_REDIRECT_URL=x \
   docker compose "${C[@]}" -f compose.oidc.yml -f compose.oidc-tls.yml config --quiet && ok "compose.oidc-tls.yml renders" || bad "oidc-tls config"
 
 docker compose "${B[@]}" down -v >/dev/null 2>&1

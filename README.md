@@ -11,7 +11,7 @@ docker compose up -d --build   # registry on :5000 (unchanged), UI on http://loc
 
 ## Requirements
 
-- Docker Compose v2 or podman-compose. Python is only needed to run the unit tests (3.9+).
+- Docker Compose v2 or podman-compose. Python is only needed to run the unit tests (3.9+; the image runs 3.13).
 - A `registry:2` (distribution 2.8) with `REGISTRY_STORAGE_DELETE_ENABLED=true` for delete, move and prune. Browse and copy work without it.
 - The registry uses no token auth. Anonymous access and basic auth are supported.
 
@@ -28,11 +28,11 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 | Optional | `UI_POLL_INTERVAL`, `UI_POLL_MAX_TAGS` | `30`, `500` | Seconds between registry walks, and tags checked per walk (the walk resumes where it stopped). |
 | Optional | `UI_STATE_DIR` | `/state` in compose | Directory for the one `state.json` history file. Unset means memory only. |
 | Optional | `UI_MAX_EVENTS`, `UI_MAX_EVENT_DAYS` | `1000`, `30` | History caps, by count and by age. |
-| Optional | `UI_MAX_CONN`, `UI_MAX_SSE` | `64`, `20` | Concurrent connections and live-update clients. Extra clients get 503. |
+| Optional | `UI_MAX_CONN`, `UI_MAX_SSE` | `64`, `20` | Concurrent connections and live-update clients. Extra connections are closed, extra live clients get 503. Keep `UI_MAX_CONN` below the 128 `pids_limit`. |
 | Optional | `LOG_LEVEL` | `info` | Python logging level. Logs go to stdout and stderr only. |
 | Optional | `UI_READONLY` | `false` | Hides and refuses copy, move and delete. |
-| Optional | `UI_ALLOWED_HOSTS` | any | Comma separated `Host` allowlist, a DNS rebinding guard. |
-| Optional | `UI_PORT` / `REGISTRY_PORT` | `8080` / `5000` | Host ports in `compose.yml`. |
+| Optional | `UI_ALLOWED_HOSTS` | any (compose: `localhost,127.0.0.1,[::1]`) | Comma separated `Host` allowlist, a DNS rebinding guard. Unset logs a warning. Set it to the name users type when the UI is not used from the same machine. The auth overrides require it. |
+| Optional | `UI_BIND`, `UI_PORT` / `REGISTRY_PORT` | `127.0.0.1`, `8080` / `5000` | Host address and ports in `compose.yml`. The UI listens on loopback only until `UI_BIND` is set. |
 
 ## Usage
 
@@ -99,9 +99,9 @@ Do not add `--delete-untagged`. In registry 2.8 it deletes the child manifests o
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/registry-lite-ui
-ExecStart=/usr/bin/podman-compose stop registry
+ExecStartPre=/usr/bin/podman-compose stop registry
 ExecStart=/usr/bin/podman-compose --profile gc run --rm gc
-ExecStart=/usr/bin/podman-compose start registry
+ExecStopPost=/usr/bin/podman-compose start registry   # runs even when gc fails
 ```
 
 Empty repositories stay in the catalog until their directory is removed from the volume. That is a `registry:2` behaviour.
@@ -112,8 +112,8 @@ Off by default. Each option is an override file and removes the UI's direct port
 
 | Option | Command |
 |---|---|
-| Basic | `htpasswd -B -c auth/htpasswd admin`, then `docker compose -f compose.yml -f compose.basic.yml up -d` |
-| OIDC | Set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_COOKIE_SECRET`, `OIDC_REDIRECT_URL` in `.env`, then `-f compose.yml -f compose.oidc.yml`. oauth2-proxy does all OIDC work. |
+| Basic | `htpasswd -B -c auth/htpasswd admin`, set `UI_ALLOWED_HOSTS`, then `docker compose -f compose.yml -f compose.basic.yml up -d` |
+| OIDC | Set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_COOKIE_SECRET`, `OIDC_REDIRECT_URL`, `OIDC_EMAIL_DOMAINS` (no default, `*` admits every account the issuer vouches for) and `UI_ALLOWED_HOSTS` in `.env`, optionally `OIDC_ALLOWED_GROUPS`, then `-f compose.yml -f compose.oidc.yml`. oauth2-proxy does all OIDC work. |
 | LDAP | `-f compose.yml -f compose.oidc.yml -f compose.ldap.yml`. dex with its LDAP connector is the OIDC provider. Edit `auth/dex-ldap.yaml`. |
 | Registry's own basic auth | `-f compose.registry-auth.yml` with `REGISTRY_USER` set and the password in `secrets/registry_password`. |
 
@@ -159,18 +159,18 @@ Built to run unattended for years without a restart.
 
 - **Logs.** Everything goes to stdout and stderr: `docker compose logs -f ui`, `podman logs -f ui`. One line per request (method, path without query, status), no bodies, headers or cookies. A repeating error logs once, then at most every 10 minutes with a count, and once more when it recovers. Poller cycles, health checks and SSE heartbeats are silent. `LOG_LEVEL=debug` adds them.
 - **Rotation.** Every service in `compose.yml` and the overrides uses `json-file` with `max-size: 10m`, `max-file: "3"`. podman-compose takes the same `logging.options`, or `podman run --log-opt max-size=10m`. In Quadlet use `LogDriver=journald` (limits come from `SystemMaxUse` in `journald.conf`) or `LogOpt=max-size=10m`.
-- **Limits.** The UI has `mem_limit: 128m`, `pids_limit: 64`, `cpus: 0.5`, a read-only root filesystem and no tmpfs. The proxies have 64 to 128 MiB and a 16 MiB `/tmp`.
+- **Limits.** The UI has `mem_limit: 128m`, `pids_limit: 128`, `cpus: 0.5`, a read-only root filesystem and no tmpfs. The registry runs with all capabilities dropped and `no-new-privileges`, so a TLS key it reads must be readable by uid 0 as owner or by group, not by capability. The proxies have 64 to 128 MiB and a 16 MiB `/tmp`.
 - **State.** The only file written is `/state/state.json` on the `ui-state` volume: at most `UI_MAX_EVENTS` events no older than `UI_MAX_EVENT_DAYS`, plus one entry per tag in the registry. It is written to a temporary file and renamed, only when it changed, at most every 30 s and once on SIGTERM. Nothing else is cached.
-- **Connections.** At most `UI_MAX_CONN` connections and `UI_MAX_SSE` live clients, 15 s per socket operation, 30 s on every call to the registry. Blobs are never held in memory: a refused mount streams the blob in 8 KiB blocks.
-- **Self-healing.** The poller and the request threads catch every exception, back off up to 5 minutes while the registry is down, and resume by themselves. `/healthz` never calls the registry and returns 503 if the poller has stalled. `restart: unless-stopped` is the backstop.
+- **Connections.** At most `UI_MAX_CONN` connections and `UI_MAX_SSE` live clients, 15 s per socket operation, 10 s for the whole request header and 10 s for a POST body (a reaper closes slower clients), 30 s on every call to the registry. A registry response is read up to 8 MiB, a list follows at most 1000 pages and never the same page twice. Blobs are never held in memory: a refused mount streams the blob in 8 KiB blocks.
+- **Self-healing.** The poller and the request threads catch every exception, back off up to 5 minutes while the registry is down, and resume by themselves. `/healthz` never calls the registry and returns 503 if the poller has stalled, and after 15 minutes of stall a watchdog exits the process so `restart: unless-stopped` brings it back. A repository with more tags than `UI_POLL_MAX_TAGS` is walked over several cycles and reported when complete.
 - **Soak test.** `tests/soak.sh` ran 25 minutes at a 1 s poll interval with `UI_MAX_EVENTS=500`, about 3 tag changes per second (2446 recorded), 5 registry outages of 20 s and about 4 SSE connects per second. RSS stayed between 20.6 and 23.9 MiB (one 35 MiB sample, limit 128 MiB) with 0 restarts. `state.json` stopped growing at 136 KB with the event count held at 500. Logs ran at about 150 KB per 5 minutes (roughly 1.8 MB an hour, under that artificial load, rotation caps it at 30 MB). The 5 outages produced 5 error lines, 1 repeat reminder and 5 recovery lines. The numbers are in `tests/evidence/soak.txt`.
 
 ## Security notes
 
 - **Threat model.** A user or page that can reach the UI port. The registry has no auth by default, so the UI adds no new privilege to someone who can already reach port 5000. Use an auth override when the UI port is reachable by people who cannot reach the registry.
 - **Can do.** Everything the registry API allows with the configured credentials: read, copy, delete manifests. **Cannot do.** Reach any other host, touch registry storage, run code on the host, or write files (read-only root filesystem, all capabilities dropped, uid 65534, `no-new-privileges`, no container socket).
-- **CSRF.** Mutations need `Content-Type: application/json` (forces a CORS preflight), a per-process `X-CSRF-Token`, and an `Origin` that matches `Host`.
-- **Input.** Repository, tag and digest are matched against the distribution spec before use. Registry `Location` and `Link` values keep only their path, so a registry response cannot redirect the UI elsewhere. Redirects are not followed.
+- **CSRF.** Mutations need `Content-Type: application/json` (forces a CORS preflight), a per-process `X-CSRF-Token`, and an `Origin` that matches `Host`. The token is public to anyone who can reach the UI, so `UI_ALLOWED_HOSTS` is what stops DNS rebinding: set it, and keep the UI on loopback or behind an auth override.
+- **Input.** Repository, tag and digest are matched against the distribution spec before use. Registry `Location` and `Link` values keep only their path, so a registry response cannot redirect the UI elsewhere. Redirects are not followed. Digests, tags and names in a registry response are checked before they go into a URL, a manifest must hash to the digest it was asked for, and a response over 8 MiB is refused. A copy follows index nesting three levels deep at most.
 - **Browser.** CSP is `default-src 'none'` with same-origin script and style only, plus `nosniff`, `no-referrer`, `frame-ancestors 'none'`.
 - **TLS.** The registry client always verifies the certificate. The UI listener is HTTP unless `UI_TLS_CERT` and `UI_TLS_KEY` are set, and it never serves both on one port.
 - **Not covered.** No audit log beyond the access line per request, no per-user authorisation, no token-auth registries.
