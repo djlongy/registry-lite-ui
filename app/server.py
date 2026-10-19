@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import secrets
-import select
+import selectors
 import signal
 import socket
 import ssl
@@ -48,7 +48,7 @@ class Config:
         self.state = P.State(os.path.join(state_dir, "state.json") if state_dir else None, n("UI_MAX_EVENTS", 1000),
                              n("UI_MAX_EVENT_DAYS", 30) * 86400)
         self.poller = None
-        self.errors = P.Throttle()
+        self.errors = P.Throttle(logger=log)
 
 
 def server_context(cert, key):
@@ -219,6 +219,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def send(self, status, body, ctype="application/json"):
+        self.server.deadline(self.request, BODY_SECS)  # a client that stops reading cannot hold the thread
         self.send_response(status)
         self.headers_out((("Content-Type", ctype), ("Content-Length", str(len(body)))))
         self.wfile.write(body)
@@ -255,7 +256,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def hung_up(self):
         """A browser sends nothing after its request, so a readable socket means it has gone. Frees the slot at once."""
-        return bool(select.select([self.connection], [], [], 0)[0])
+        with selectors.DefaultSelector() as sel:  # not select(), which fails for descriptors above 1024
+            sel.register(self.connection, selectors.EVENT_READ)
+            return bool(sel.select(0))
 
     def read_json(self):
         """The body of a POST: a plain Content-Length of at most MAX_BODY bytes, all read within BODY_SECS."""
@@ -344,7 +347,7 @@ def watchdog(cfg, every=60):
         time.sleep(every)
         if not cfg.poller.healthy():
             log.error("poller has stalled, exiting so the container restarts")
-            cfg.state.save(force=True)
+            cfg.state.save(force=True, wait=5)
             os._exit(1)
 
 
@@ -356,7 +359,7 @@ def main(env):
         sys.exit(f"configuration error: {e}")
     if not cfg.hosts:
         log.warning("UI_ALLOWED_HOSTS is not set: any Host header is accepted, so DNS rebinding is not blocked")
-    httpd = BoundedServer((env.get("UI_BIND", "0.0.0.0"), int(env.get("UI_PORT", "8080"))), make_handler(cfg), cfg.max_conn)
+    httpd = BoundedServer((env.get("UI_LISTEN", "0.0.0.0"), int(env.get("UI_PORT", "8080"))), make_handler(cfg), cfg.max_conn)
     cert, key = env.get("UI_TLS_CERT"), env.get("UI_TLS_KEY")
     if bool(cert) != bool(key):
         sys.exit("UI_TLS_CERT and UI_TLS_KEY must be set together")

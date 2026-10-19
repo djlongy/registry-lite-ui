@@ -539,6 +539,51 @@ class BigRepo(unittest.TestCase):
         self.assertEqual(len(st.tags), 5)
 
 
+class Resilience(unittest.TestCase):
+    def test_a_repository_with_a_hostile_tag_list_is_skipped_not_fatal(self):
+        class Reg(FakeRegistry):
+            def tags(self, r):
+                if r == "a":
+                    raise R.RegistryError(400, "registry list is too large")
+                return super().tags(r)
+        reg = Reg({"a": {}, "b": {"1": "d1"}})
+        st = P.State(clock=Clock())
+        P.Poller(reg, st, max_tags=10).cycle()
+        self.assertIn("b:1", st.tags)
+
+    def test_tag_lists_keep_only_valid_strings(self):
+        u = Upstream({"/v2/a/tags/list?n=1000": (200, {}, json.dumps({"tags": ["ok", 5, {"x": 1}, "bad tag"]}).encode()),
+                      "/v2/b/tags/list?n=1000": (200, {}, b'{"tags":"abc"}')})
+        self.addCleanup(u.close)
+        c = R.Client(u.url)
+        self.assertEqual(c.tags("a"), ["ok"])
+        with self.assertRaises(R.RegistryError):
+            c.tags("b")
+
+    def test_oversized_state_is_not_written_and_save_waits_for_the_lock(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        s = P.State(os.path.join(d, "state.json"), clock=Clock())
+        s.mark_baselined()
+        old, P.MAX_STATE_BYTES = P.MAX_STATE_BYTES, 10
+        self.addCleanup(setattr, P, "MAX_STATE_BYTES", old)
+        s.save(force=True)
+        self.assertEqual(os.listdir(d), [])
+        P.MAX_STATE_BYTES = old
+        with s.write_lock:
+            s.save(force=True, wait=0.1)  # gives up instead of hanging behind a stuck writer
+        self.assertEqual(os.listdir(d), [])
+        s.save(force=True)
+        self.assertEqual(os.listdir(d), ["state.json"])
+
+    def test_progress_ticks_the_watchdog(self):
+        reg = FakeRegistry({"a": {f"t{i}": "d" for i in range(5)}})
+        p = P.Poller(reg, P.State(clock=Clock()), max_tags=10)
+        p.last_tick = 0
+        p.scan("a", 10)
+        self.assertGreater(p.last_tick, 0)
+
+
 class Http(unittest.TestCase):
     def serve(self, env=None, conns=8):
         cfg = S.Config(env or {})

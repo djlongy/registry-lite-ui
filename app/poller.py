@@ -9,7 +9,7 @@ import time
 from collections import deque
 
 log = logging.getLogger("poller")
-MAX_STATE_BYTES = 64 << 20
+MAX_STATE_BYTES = 8 << 20  # a state file over this is neither written nor read
 
 
 def diff(old, new, now):
@@ -37,15 +37,15 @@ def well_formed(data):
 
 class Throttle:
     """Log an error when it changes, then at most every `every` seconds with a repeat count. Log recovery once."""
-    def __init__(self, every=600, clock=time.monotonic):
-        self.every, self.clock, self.seen = every, clock, {}
+    def __init__(self, every=600, clock=time.monotonic, logger=log):
+        self.every, self.clock, self.seen, self.log = every, clock, {}, logger
 
     def error(self, key, msg):
         now = self.clock()
         msg = ascii(msg)[1:-1]  # one line, no control characters, whatever the registry sent
         last_msg, last_t, skipped = self.seen.get(key, (None, 0, 0))
         if msg != last_msg or now - last_t >= self.every:
-            log.warning("%s%s", msg, f" (repeated {skipped} more times)" if skipped and msg == last_msg else "")
+            self.log.warning("%s%s", msg, f" (repeated {skipped} more times)" if skipped and msg == last_msg else "")
             self.seen[key] = (msg, now, 0)
         else:
             self.seen[key] = (last_msg, last_t, skipped + 1)
@@ -115,10 +115,15 @@ class State:
         return json.dumps({"v": 1, "since": self.since, "baselined": self.baselined, "seq": self.seq,
                            "tags": self.tags, "events": list(self.events)}, sort_keys=True, separators=(",", ":"))
 
-    def save(self, force=False):
-        """Write the state atomically, only if it changed and not more often than save_every."""
-        with self.write_lock:
+    def save(self, force=False, wait=-1):
+        """Write the state atomically, only if it changed and not more often than save_every.
+        The poller, the shutdown path and the watchdog all call this; `wait` bounds how long one waits for the others."""
+        if not self.write_lock.acquire(timeout=wait):
+            return
+        try:
             self.write(force)
+        finally:
+            self.write_lock.release()
 
     def write(self, force):
         if not self.path or not (self.dirty or force):
@@ -130,6 +135,9 @@ class State:
             self.dirty = False
         self.saved_at = self.clock()
         if text == self.saved:
+            return
+        if len(text) > MAX_STATE_BYTES:
+            log.warning("state is %d bytes, over the %d byte limit: history is kept in memory only", len(text), MAX_STATE_BYTES)
             return
         d = os.path.dirname(self.path)
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".state-")
@@ -194,6 +202,7 @@ class Poller(threading.Thread):
         todo = [t for t in tags if t not in done][:budget]
         for t in todo:
             done[t] = self.client.manifest(r, t, head=True)[2]
+            self.last_tick = time.monotonic()  # progress, so a slow registry is not mistaken for a stall
         self.partial = (r, done)
         if any(t not in done for t in tags):
             return None, len(todo)
@@ -212,6 +221,7 @@ class Poller(threading.Thread):
             except Exception as e:  # a repo deleted mid-walk, or one bad tag: skip it this cycle, but a dead registry aborts
                 if getattr(e, "status", 0) not in (404, 400):
                     raise
+                self.throttle.error(f"skip {r}", f"skipping {r}: {getattr(e, 'message', e)}")
                 self.partial = ("", {})
                 continue
             budget -= used

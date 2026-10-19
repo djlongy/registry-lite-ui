@@ -124,13 +124,16 @@ class Client:
         out, seen, size = [], set(), 0
         while path:
             if path in seen or len(seen) >= MAX_PAGES:
-                raise RegistryError(502, "registry paging does not end")
+                raise RegistryError(400, "registry paging does not end")
             seen.add(path)
             _, h, data = self.call("GET", path)
             size += len(data)
-            out += (json_load(data).get(key) or [])
+            items = json_load(data).get(key) or []
+            if not isinstance(items, list):
+                raise RegistryError(502, "registry returned unexpected JSON")
+            out += items
             if len(out) > MAX_ITEMS or size > MAX_LIST_BYTES:
-                raise RegistryError(502, "registry list is too large")
+                raise RegistryError(400, "registry list is too large")
             link = re.match(r'<([^>]+)>', h.get("Link", ""))
             path = local_path(link.group(1)) if link else None
         return out
@@ -140,7 +143,8 @@ class Client:
         return [r for r in self.paged("/v2/_catalog?n=1000", "repositories") if isinstance(r, str) and valid_repo(r)]
 
     def tags(self, repo):
-        return self.paged(f"/v2/{check_repo(repo)}/tags/list?n=1000", "tags")
+        """Tag names as the registry lists them, minus any that are not valid tags."""
+        return [t for t in self.paged(f"/v2/{check_repo(repo)}/tags/list?n=1000", "tags") if isinstance(t, str) and TAG_RE.fullmatch(t)]
 
     def manifest(self, repo, ref, head=False):
         """Return (raw bytes, media type, digest). Raw bytes are kept so a copy has the same digest."""
