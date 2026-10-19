@@ -40,7 +40,7 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 
 `docker compose up -d --build` (or `up -d` to pull the published image, see Image), open `http://localhost:8080`, and keep pushing and pulling against `registry.example.internal:5000` as before.
 
-For a registry that already runs as its own service, start the UI alone: `REGISTRY_URL=https://registry.example.internal:5000 podman compose -f compose.ui.yml up -d` (podman-compose 1.2 or newer, or `docker compose`). See [UI only](#ui-only).
+For a registry that already runs as its own service, start the UI alone: `REGISTRY_URL=https://registry.example.internal:5000 podman-compose -f compose.ui.yml up -d` (podman-compose 1.2 or newer, or `docker compose`; `podman compose` runs the docker-compose plugin when it is installed, so use `podman-compose` or set `PODMAN_COMPOSE_PROVIDER=podman-compose`). See [UI only](#ui-only).
 
 ## Interface
 
@@ -80,17 +80,36 @@ podman build --format docker -f Containerfile -t registry-lite-ui .   # or: dock
 
 ## UI only
 
-`compose.ui.yml` runs the `ui` service with the same limits, logging and hardening as `compose.yml`, and a `ui-state` volume. `REGISTRY_URL` is required. For HTTPS set `REGISTRY_CA_FILE`, `UI_TLS_CERT` and `UI_TLS_KEY` to paths inside the container. Host directories mount read-only at `/certs` and `/keys`, from `CERTS_DIR` and `KEYS_DIR` (default `/data/certs` and `/data/keys`).
+`compose.ui.yml` runs the `ui` service with the same limits, logging and hardening as `compose.yml`, and a `ui-state` volume. `REGISTRY_URL` is required and must be reachable from inside the container: for a registry on the same host use its DNS name and published port, not `localhost`. For HTTPS set `REGISTRY_CA_FILE`, `UI_TLS_CERT` and `UI_TLS_KEY` to paths inside the container. Host directories mount read-only at `/certs` and `/keys`, from `CERTS_DIR` and `KEYS_DIR` (default `/data/certs` and `/data/keys`).
 
 ```sh
 export REGISTRY_URL=https://registry.example.internal:5000 REGISTRY_CA_FILE=/certs/ca.crt UI_TLS_CERT=/certs/tls.crt UI_TLS_KEY=/keys/ui.key
-podman compose -f compose.ui.yml up -d
+podman-compose -f compose.ui.yml up -d
 ```
 
 - The mounts use `:ro,z` (shared SELinux label). `:Z` gives the directory a label private to this container, and the registry service that mounts `/data/certs` too would lose access.
 - The UI runs as uid 65534 and needs a readable copy of the key. Rootful: `install -m 0440 -g 65534 /data/keys/registry.key /data/keys/ui.key`. Rootless: uid 65534 in the container is a sub-uid on the host, so create the copy with `install -m 0400 /path/registry.key /data/keys/ui.key && podman unshare chown 65534:65534 /data/keys/ui.key`.
 - To start at boot, `podman-compose -f compose.ui.yml systemd -a create-unit`, then `systemctl --user enable --now podman-compose@registry-lite-ui`. Quadlet works too, see [Podman](#podman).
+- Rootful on a VM, `/etc/systemd/system/registry-lite-ui.service` (needs `/etc/registry-lite-ui.env` with `REGISTRY_URL` and the other variables, then `systemctl enable --now registry-lite-ui`):
+
+```ini
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/registry-lite-ui
+EnvironmentFile=/etc/registry-lite-ui.env
+ExecStart=/usr/bin/podman-compose -f compose.ui.yml up -d
+ExecStop=/usr/bin/podman-compose -f compose.ui.yml down
+
+[Install]
+WantedBy=multi-user.target
+```
 - To pin the image, set `UI_IMAGE=ghcr.io/djlongy/registry-lite-ui@sha256:<digest>`.
+- To run a commit other than main, build it with `podman build --format docker -f Containerfile -t localhost/registry-lite-ui:<tag> .` and set `UI_IMAGE=localhost/registry-lite-ui:<tag>`. `--format docker` keeps the `HEALTHCHECK`; the OCI format drops it with a warning.
 
 ## Components
 
