@@ -9,6 +9,7 @@ import time
 from collections import deque
 
 log = logging.getLogger("poller")
+MAX_STATE_BYTES = 64 << 20
 
 
 def diff(old, new, now):
@@ -23,6 +24,17 @@ def repo_of(ref):
     return ref.rsplit(":", 1)[0]
 
 
+def well_formed(data):
+    """The state file is read back as is, so check its shape once instead of failing on every poll."""
+    num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)  # noqa: E731
+    return (isinstance(data, dict) and isinstance(data.get("seq"), int) and isinstance(data.get("baselined"), bool)
+            and num(data.get("since")) and isinstance(data.get("tags"), dict) and isinstance(data.get("events"), list)
+            and all(isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("digest"), str)
+                    and num(v.get("changed")) and num(v.get("first")) for k, v in data["tags"].items())
+            and all(isinstance(e, dict) and isinstance(e.get("ref"), str) and num(e.get("t")) and isinstance(e.get("seq"), int)
+                    and e.get("type") in ("new", "retagged", "deleted") for e in data["events"]))
+
+
 class Throttle:
     """Log an error when it changes, then at most every `every` seconds with a repeat count. Log recovery once."""
     def __init__(self, every=600, clock=time.monotonic):
@@ -30,6 +42,7 @@ class Throttle:
 
     def error(self, key, msg):
         now = self.clock()
+        msg = ascii(msg)[1:-1]  # one line, no control characters, whatever the registry sent
         last_msg, last_t, skipped = self.seen.get(key, (None, 0, 0))
         if msg != last_msg or now - last_t >= self.every:
             log.warning("%s%s", msg, f" (repeated {skipped} more times)" if skipped and msg == last_msg else "")
@@ -118,6 +131,8 @@ class State:
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.path)
             self.saved = text
         except OSError as e:
@@ -133,8 +148,12 @@ class State:
                 os.unlink(os.path.join(d, n))
         try:
             with open(self.path) as f:
-                raw = f.read()
+                raw = f.read(MAX_STATE_BYTES + 1)
+            if len(raw) > MAX_STATE_BYTES:
+                raise ValueError("file too large")
             data = json.loads(raw)
+            if not well_formed(data):
+                raise ValueError("unexpected structure")
             self.tags, self.seq, self.baselined = data["tags"], data["seq"], data["baselined"]
             self.since = data["since"]
             self.events = deque(data["events"])
@@ -153,6 +172,7 @@ class Poller(threading.Thread):
         super().__init__(daemon=True, name="poller")
         self.client, self.state, self.interval, self.max_tags = client, state, interval, max_tags
         self.cursor, self.covered, self.stop, self.kick = "", set(), threading.Event(), threading.Event()
+        self.partial = ("", {})  # a repository larger than the budget, with the tags checked so far
         self.throttle, self.last_tick = Throttle(), time.monotonic()
 
     def healthy(self):
@@ -160,6 +180,20 @@ class Poller(threading.Thread):
 
     def wake(self):
         self.kick.set()
+
+    def scan(self, r, budget):
+        """Check up to `budget` more tags of r. Returns (digests by ref, tags checked), or None while r is unfinished."""
+        tags = sorted(self.client.tags(r))
+        name, done = self.partial
+        done = done if name == r else {}
+        todo = [t for t in tags if t not in done][:budget]
+        for t in todo:
+            done[t] = self.client.manifest(r, t, head=True)[2]
+        self.partial = (r, done)
+        if any(t not in done for t in tags):
+            return None, len(todo)
+        self.partial = ("", {})
+        return {f"{r}:{t}": done[t] for t in tags}, max(len(todo), 1)
 
     def cycle(self):
         repos = sorted(self.client.catalog())
@@ -169,15 +203,17 @@ class Poller(threading.Thread):
             if budget <= 0:
                 break
             try:
-                tags = self.client.tags(r)
-                found = {f"{r}:{t}": self.client.manifest(r, t, head=True)[2] for t in tags}
+                found, used = self.scan(r, budget)
             except Exception as e:  # a repo deleted mid-walk, or one bad tag: skip it this cycle, but a dead registry aborts
                 if getattr(e, "status", 0) not in (404, 400):
                     raise
+                self.partial = ("", {})
                 continue
+            budget -= used
+            if found is None:  # unfinished: resume here next cycle, report nothing for r yet
+                break
             observed.update(found)
             scanned.add(r)
-            budget -= max(len(tags), 1)
             self.cursor = r
         gone = {k.rsplit(":", 1)[0] for k in self.state.tags} - set(repos)
         self.state.update(scanned, observed, gone)

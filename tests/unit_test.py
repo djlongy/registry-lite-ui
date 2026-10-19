@@ -1,11 +1,14 @@
 import http.server
+import json
 import os
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
@@ -54,8 +57,9 @@ class Names(unittest.TestCase):
                 R.check_ref(bad)
 
     def test_delete_needs_digest(self):
+        c = FakeClient()
         with self.assertRaises(R.RegistryError):
-            R.delete(FakeClient(), "a/b", "latest")
+            R.delete(c, "a/b", "latest")
 
 
 class Copy(unittest.TestCase):
@@ -77,8 +81,9 @@ class Copy(unittest.TestCase):
         self.assertFalse([p for m, p in c.calls if "blobs" in p])
 
     def test_move_same_repo_refused(self):
+        c = FakeClient()
         with self.assertRaises(R.RegistryError):
-            R.move(FakeClient(), "a/b", "t", "a/b", "u")
+            R.move(c, "a/b", "t", "a/b", "u")
 
 
 class Csrf(unittest.TestCase):
@@ -102,8 +107,9 @@ class Paths(unittest.TestCase):
         self.assertEqual(R.local_path("http://evil.example/v2/a/blobs/uploads/u?_state=x"), "/v2/a/blobs/uploads/u?_state=x")
 
     def test_non_v2_path_refused(self):
+        c = R.Client("http://registry:5000")
         with self.assertRaises(R.RegistryError):
-            R.Client("http://registry:5000").open("GET", "/admin")
+            c.open("GET", "/admin")
 
 
 def make_cert(d, san):
@@ -122,8 +128,8 @@ class Tls(unittest.TestCase):
         cert, key = make_cert(d, san)
         ctx = S.server_context(cert, key)
         self.assertEqual(ctx.minimum_version, ssl.TLSVersion.TLSv1_2)
-        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), S.make_handler(S.Config({})))
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        httpd = S.BoundedServer(("127.0.0.1", 0), S.make_handler(S.Config({})), 8)
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
@@ -136,14 +142,16 @@ class Tls(unittest.TestCase):
 
     def test_without_ca_is_refused(self):
         cert, port = self.serve("DNS:localhost")
+        c = R.Client(f"https://localhost:{port}")
         with self.assertRaises(R.RegistryError) as e:
-            R.Client(f"https://localhost:{port}").call("GET", "/v2/x")
+            c.call("GET", "/v2/x")
         self.assertIn("TLS verification failed", e.exception.message)
 
     def test_name_not_in_san_says_so(self):
         cert, port = self.serve("DNS:other.example.internal")
+        c = R.Client(f"https://localhost:{port}", cafile=cert)
         with self.assertRaises(R.RegistryError) as e:
-            R.Client(f"https://localhost:{port}", cafile=cert).call("GET", "/v2/x")
+            c.call("GET", "/v2/x")
         self.assertIn("subjectAltName", e.exception.message)
 
 
@@ -319,8 +327,7 @@ class ThrottleTests(unittest.TestCase):
 
 
 class Bounded(unittest.TestCase):
-    def test_excess_connections_get_503(self):
-        import socket
+    def test_excess_connections_are_closed_without_a_reply(self):
         cfg = S.Config({"UI_MAX_SSE": "2"})
         srv = S.BoundedServer(("127.0.0.1", 0), S.make_handler(cfg), 2)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -328,17 +335,260 @@ class Bounded(unittest.TestCase):
         port = srv.server_address[1]
         held = [socket.create_connection(("127.0.0.1", port)) for _ in range(2)]  # idle connections hold the slots
         self.addCleanup(lambda: [h.close() for h in held])
-        import time
         time.sleep(0.3)
         c = socket.create_connection(("127.0.0.1", port))
         self.addCleanup(c.close)
         c.settimeout(3)
-        self.assertTrue(c.recv(100).startswith(b"HTTP/1.1 503"))
+        self.assertEqual(c.recv(100), b"")
 
     def test_sse_clients_are_capped(self):
         cfg = S.Config({"UI_MAX_SSE": "1"})
         self.assertTrue(cfg.sse_slots.acquire(blocking=False))
         self.assertFalse(cfg.sse_slots.acquire(blocking=False))
+
+
+
+class Upstream:
+    """A scripted registry: GET answers come from a table of path -> (status, headers, body)."""
+    def __init__(self, table):
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                status, headers, body = table.get(self.path, (404, {}, b"{}"))
+                self.send_response(status)
+                for k, v in {**headers, "Content-Length": str(len(body))}.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class Hostile(unittest.TestCase):
+    """A registry response is not trusted."""
+    def upstream(self, table):
+        u = Upstream(table)
+        self.addCleanup(u.close)
+        return R.Client(u.url)
+
+    def test_paging_loop_is_cut(self):
+        link = {"Link": '</v2/_catalog?n=1000>; rel="next"'}
+        c = self.upstream({"/v2/_catalog?n=1000": (200, link, b'{"repositories":["a"]}')})
+        with self.assertRaises(R.RegistryError) as e:
+            c.catalog()
+        self.assertIn("paging", e.exception.message)
+
+    def test_oversized_response_is_refused(self):
+        c = self.upstream({"/v2/a/manifests/t": (200, {}, b"x" * 2048)})
+        old, R.MAX_BODY = R.MAX_BODY, 1024
+        self.addCleanup(setattr, R, "MAX_BODY", old)
+        with self.assertRaises(R.RegistryError) as e:
+            c.manifest("a", "t")
+        self.assertIn("too large", e.exception.message)
+
+    def test_manifest_must_match_its_digest(self):
+        body = b'{"layers":[]}'
+        good = "sha256:" + __import__("hashlib").sha256(body).hexdigest()
+        c = self.upstream({"/v2/a/manifests/t": (200, {"Docker-Content-Digest": D("0")}, body),
+                           f"/v2/a/manifests/{D('1')}": (200, {"Docker-Content-Digest": D("1")}, body),
+                           f"/v2/a/manifests/{good}": (200, {}, body)})
+        for ref in ("t", D("1")):
+            with self.assertRaises(R.RegistryError, msg=ref):
+                c.manifest("a", ref)
+        self.assertEqual(c.manifest("a", good)[2], good)
+
+    def test_digests_from_a_manifest_are_checked(self):
+        bad = json.dumps({"manifests": [{"digest": "../../x"}], "layers": [{"digest": "sha256:zz"}]}).encode()
+        with self.assertRaises(R.RegistryError):
+            R.children(bad, IDX)
+        with self.assertRaises(R.RegistryError):
+            R.blobs(bad)
+
+    def test_error_text_never_carries_the_credentials(self):
+        u = Upstream({"/v2/a/manifests/t": (500, {}, json.dumps({"errors": [{"code": "X", "message": "echo Basic cmVndXNlcjpjYW5hcnktMTIzNA== canary-1234\nFORGED"}]}).encode())})
+        self.addCleanup(u.close)
+        c = R.Client(u.url, "reguser", "canary-1234")
+        with self.assertRaises(R.RegistryError) as e:
+            c.manifest("a", "t")
+        self.assertNotIn("canary", e.exception.message)
+        self.assertNotIn("cmVnd", e.exception.message)
+
+    def test_catalog_drops_invalid_names_and_header_digest_is_checked(self):
+        c = self.upstream({"/v2/_catalog?n=1000": (200, {}, json.dumps({"repositories": ["ok/app", "BAD", "x" * 300, 5]}).encode()),
+                           "/v2/ok/app/manifests/t": (200, {"Docker-Content-Digest": "not-a-digest"}, b"{}")})
+        self.assertEqual(c.catalog(), ["ok/app"])
+        with self.assertRaises(R.RegistryError):
+            c.manifest("ok/app", "t", head=True)
+
+    def test_json_must_be_an_object(self):
+        with self.assertRaises(R.RegistryError):
+            R.json_load(b"[1]")
+
+    def test_registry_url_is_validated(self):
+        for bad in ["file:///etc/passwd", "ftp://h", "http://u:p@h:5000", "http://h:5000/x", "http://h?x=1", "registry:5000"]:
+            with self.assertRaises(ValueError, msg=bad):
+                R.Client(bad)
+
+    def test_dot_dot_path_refused(self):
+        c = R.Client("http://registry:5000")
+        with self.assertRaises(R.RegistryError):
+            c.open("GET", "/v2/a/../../x")
+
+    def test_self_referencing_index_stops(self):
+        class Loop(FakeClient):
+            def manifest(self, repo, ref, head=False):
+                return self.m[D("a")][0].replace(D("b").encode(), D("a").encode()), IDX, D("a")
+        c = Loop()
+        with self.assertRaises(R.RegistryError) as e:
+            R.copy(c, "s/a", "latest", "d/a", "latest")
+        self.assertIn("nesting", e.exception.message)
+
+    def test_delete_keeps_an_independently_tagged_child(self):
+        class Tagged(FakeClient):
+            tags = lambda self, repo: ["index", "standalone"]  # noqa: E731
+            delete_enabled = lambda self: True  # noqa: E731
+
+            def manifest(self, repo, ref, head=False):
+                return self.m[D("b") if ref == "standalone" else ref if ref in self.m else D("a")]
+        gone = R.delete(Tagged(), "app", D("a"), with_children=True)
+        self.assertEqual(gone, [D("a"), D("c")])
+
+
+class State2(unittest.TestCase):
+    def test_wrong_shape_is_ignored(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "state.json")
+        for text in ['{"v":1,"since":1,"baselined":true,"seq":1,"tags":{"a:1":5},"events":[]}',
+                     '{"v":1,"since":1,"baselined":true,"seq":1,"tags":{},"events":[{"ref":1}]}', "[]"]:
+            with open(path, "w") as f:
+                f.write(text)
+            s = P.State(path)
+            self.assertEqual((s.tags, len(s.events), s.baselined), ({}, 0, False), text)
+
+    def test_error_log_is_one_line(self):
+        th = P.Throttle()
+        with self.assertLogs("poller", "WARNING") as cm:
+            th.error("registry", "bad\n2026-01-01 FAKE line\x1b[31m")
+        self.assertEqual(len(cm.output[0].splitlines()), 1)
+
+
+class BigRepo(unittest.TestCase):
+    def test_one_repository_larger_than_the_budget(self):
+        reg = FakeRegistry({"app": {f"t{i:02d}": f"d{i}" for i in range(10)}, "b": {"1": "x"}})
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st, max_tags=4)
+        heads = []
+        for _ in range(5):
+            before = reg.heads
+            p.cycle()
+            heads.append(reg.heads - before)
+        self.assertLessEqual(max(heads), 4)
+        self.assertTrue(st.baselined)
+        self.assertEqual(len(st.tags), 11)
+        self.assertEqual(list(st.events), [])
+
+
+class Http(unittest.TestCase):
+    def serve(self, env=None, conns=8):
+        cfg = S.Config(env or {})
+        srv = S.BoundedServer(("127.0.0.1", 0), S.make_handler(cfg), conns)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return cfg, srv.server_address[1]
+
+    def talk(self, port, request, timeout=5):
+        c = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        self.addCleanup(c.close)
+        c.sendall(request)
+        out = b""
+        while chunk := c.recv(4096):
+            out += chunk
+        return out
+
+    def post(self, port, cfg_csrf, length, body=b"{}", extra=""):
+        return self.talk(port, (f"POST /api/copy HTTP/1.0\r\nHost: t\r\nContent-Type: application/json\r\nX-CSRF-Token: {cfg_csrf}\r\n"
+                                f"Content-Length: {length}\r\n{extra}\r\n").encode() + body)
+
+    def test_body_framing_is_strict(self):
+        cfg, port = self.serve()
+        status = lambda out: out.split(b"\r\n")[0].split(b" ")[1]  # noqa: E731
+        self.assertEqual(status(self.post(port, cfg.csrf, "-1", b"x" * 100)), b"411")
+        self.assertEqual(status(self.post(port, cfg.csrf, "abc")), b"411")
+        self.assertEqual(status(self.post(port, cfg.csrf, "2", extra="Transfer-Encoding: chunked\r\n")), b"411")
+        self.assertEqual(status(self.post(port, cfg.csrf, "5000", b"x" * 5000)), b"413")
+        self.assertEqual(status(self.post(port, cfg.csrf, "2")), b"400")  # well formed, but no src/dst keys
+        self.assertEqual(status(self.post(port, "wrong", "2")), b"403")
+
+    def test_headers_and_methods(self):
+        srv, port = self.serve()
+        out = self.talk(port, b"GET /nope HTTP/1.0\r\nHost: t\r\n\r\n")
+        self.assertIn(b" 404 ", out.split(b"\r\n")[0])
+        for h in (b"Content-Security-Policy", b"X-Content-Type-Options", b"Cross-Origin-Resource-Policy: same-origin", b"Referrer-Policy"):
+            self.assertIn(h, out)
+        out = self.talk(port, b"PUT /api/copy HTTP/1.0\r\nHost: t\r\n\r\n")
+        self.assertIn(b" 405 ", out.split(b"\r\n")[0])
+        self.assertIn(b"application/json", out)
+
+    def test_host_names(self):
+        self.assertEqual([S.host_only(h) for h in ("ui:8080", "UI.Example", "[::1]:8080", "[::1]", "localhost:80")],
+                         ["ui", "ui.example", "[::1]", "[::1]", "localhost"])
+
+    def test_host_allowlist(self):
+        srv, port = self.serve({"UI_ALLOWED_HOSTS": "ui.example, [::1]"})
+        self.assertIn(b" 421 ", self.talk(port, b"GET /nope HTTP/1.0\r\nHost: evil.example\r\n\r\n").split(b"\r\n")[0])
+        self.assertIn(b" 404 ", self.talk(port, b"GET /nope HTTP/1.0\r\nHost: UI.example:8080\r\n\r\n").split(b"\r\n")[0])
+        self.assertIn(b" 200 ", self.talk(port, b"GET /healthz HTTP/1.0\r\nHost: 127.0.0.1:8080\r\n\r\n").split(b"\r\n")[0])
+
+    def test_slow_header_is_cut_off(self):
+        old, S.HEADER_SECS = S.HEADER_SECS, 1
+        self.addCleanup(setattr, S, "HEADER_SECS", old)
+        srv, port = self.serve()
+        c = socket.create_connection(("127.0.0.1", port), timeout=6)
+        self.addCleanup(c.close)
+        start = time.monotonic()
+        try:  # one byte every 0.4 s never trips the 15 s socket timeout
+            for b in b"GET /healthz HTTP/1.0\r\nX-Slow: ":
+                c.sendall(bytes([b]))
+                time.sleep(0.4)
+        except OSError:
+            pass
+        self.assertLess(time.monotonic() - start, 6)
+        try:
+            self.assertEqual(c.recv(100), b"")
+        except ConnectionResetError:
+            pass  # closed with unread data pending: also a close
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl not installed")
+class TlsOverflow(unittest.TestCase):
+    def test_overflow_does_not_block_the_listener(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        cert, key = make_cert(d, "DNS:localhost")
+        srv = S.BoundedServer(("127.0.0.1", 0), S.make_handler(S.Config({})), 1)
+        srv.socket = S.server_context(cert, key).wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        port = srv.server_address[1]
+        holder = socket.create_connection(("127.0.0.1", port))  # takes the only slot, never handshakes
+        time.sleep(0.3)
+        extra = socket.create_connection(("127.0.0.1", port))  # overflow, must be dropped at once
+        time.sleep(0.3)
+        holder.close()
+        extra.close()
+        time.sleep(0.5)
+        c = R.Client(f"https://localhost:{port}", cafile=cert)
+        self.assertEqual(c.call("GET", "/v2/x", ok=(404,))[0], 404)
 
 
 if __name__ == "__main__":
