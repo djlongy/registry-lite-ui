@@ -494,6 +494,41 @@ class Hostile(unittest.TestCase):
         self.assertEqual(gone, [D("a"), D("c")])
 
 
+class ChildOfAnIndex(unittest.TestCase):
+    """A digest that is also a child of a tagged index must not be deleted, or the index breaks for that platform."""
+    def client(self):
+        class C(FakeClient):
+            tags = lambda self, repo: ["1.36", "certcheck"]  # noqa: E731
+            delete_enabled = lambda self: True  # noqa: E731
+
+            def manifest(self, repo, ref, head=False):
+                return self.m[{"1.36": D("a"), "certcheck": D("b")}.get(ref, ref)]
+        return C()
+
+    def test_delete_of_a_child_is_refused_with_409(self):
+        c = self.client()
+        with self.assertRaises(R.RegistryError) as e:
+            R.delete(c, "test/busybox", D("b"))
+        self.assertEqual(e.exception.status, 409)
+        self.assertIn("1.36", e.exception.message)
+        self.assertEqual([m for m, _ in c.calls if m == "DELETE"], [])
+
+    def test_the_index_itself_and_unrelated_digests_can_be_deleted(self):
+        c = self.client()
+        self.assertEqual(R.delete(c, "test/busybox", D("a")), [D("a")])
+
+    def test_move_of_a_child_is_refused_before_anything_is_copied(self):
+        c = self.client()
+        with self.assertRaises(R.RegistryError) as e:
+            R.move(c, "test/busybox", "certcheck", "other/busybox", "certcheck")
+        self.assertEqual(e.exception.status, 409)
+        self.assertEqual(c.calls, [])
+
+    def test_platform_is_named(self):
+        self.assertEqual(R.platform_of({"platform": {"os": "linux", "architecture": "arm64", "variant": "v8"}}), "linux/arm64/v8")
+        self.assertEqual(R.platform_of({}), "")
+
+
 class State2(unittest.TestCase):
     def test_wrong_shape_is_ignored(self):
         d = tempfile.mkdtemp()

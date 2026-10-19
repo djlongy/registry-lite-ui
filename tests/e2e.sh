@@ -68,6 +68,15 @@ ui() {
   [ $left -eq 0 ] && ok "delete with children: no child manifest left" || bad "children left: $left"
   check "delete: source repo copy untouched" skopeo inspect --raw --tls-verify=false docker://$REG/lib/busybox:up-multi
 
+  echo "-- a digest that is a child of an index cannot be deleted"
+  local kid resp
+  kid=$(skopeo inspect --raw --tls-verify=false docker://$REG/lib/busybox:up-multi | jq -r '.manifests[0].digest')
+  post /api/copy "{\"src\":\"lib/busybox\",\"srcRef\":\"$kid\",\"dst\":\"lib/busybox\",\"dstRef\":\"child-tag\"}" | jq -e .digest >/dev/null
+  resp=$(curl -sS ${UI_CURL_ARGS:-} -w '\n%{http_code}' -X POST "$UI/api/delete" -H 'Content-Type: application/json' -H "X-CSRF-Token: $(csrf)" -d "{\"repo\":\"lib/busybox\",\"digest\":\"$kid\"}")
+  [ "${resp##*$'\n'}" = 409 ] && ok "delete of a tagged child: HTTP 409" || bad "child delete status ${resp##*$'\n'}"
+  printf '%s' "${resp%$'\n'*}" | jq -e '.error | test("child .* of the index tagged .*up-multi")' >/dev/null && ok "refusal names the parent index tag" || bad "refusal text"
+  check "the child manifest still exists after the refused delete" skopeo inspect --raw --tls-verify=false docker://$REG/lib/busybox@"$kid"
+
   echo "-- guards"
   [ "$(code -X POST "$UI/api/delete" -H 'Content-Type: application/json' -d '{}')" = 403 ] && ok "POST without CSRF token: 403" || bad "csrf missing"
   [ "$(code -X POST "$UI/api/delete" -H 'Content-Type: application/json' -H "X-CSRF-Token: $(csrf)" -H 'Origin: http://evil.example' -d '{}')" = 403 ] && ok "POST from foreign Origin: 403" || bad "csrf origin"

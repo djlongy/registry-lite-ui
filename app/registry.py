@@ -252,11 +252,36 @@ def tags_of(c, repo, digest):
     return [t for t in c.tags(repo) if c.manifest(repo, t, head=True)[2] == digest]
 
 
+def platform_of(entry):
+    p = entry.get("platform")
+    return "/".join(str(p[k]) for k in ("os", "architecture", "variant") if isinstance(p, dict) and k in p)
+
+
+def check_not_a_child(c, repo, digest):
+    """Refuse (409) when a tagged index in repo lists digest as a child: the registry deletes by digest, so the
+    delete would break that index for the platform. An index no tag points at cannot be found from the API."""
+    seen, used_by = {}, {}
+    for tag in c.tags(repo):
+        _, mtype, dg = c.manifest(repo, tag, head=True)
+        if mtype not in INDEX_TYPES or dg == digest:
+            continue
+        if dg not in seen:
+            seen[dg] = {m.get("digest"): platform_of(m) for m in json_load(c.manifest(repo, dg)[0]).get("manifests", [])}
+        if digest in seen[dg]:
+            used_by[tag] = seen[dg][digest]
+    if used_by:
+        names = ", ".join(sorted(used_by))
+        plat = ", ".join(sorted({p for p in used_by.values() if p}))
+        raise RegistryError(409, f"{digest[:19]} is a child{f' ({plat})' if plat else ''} of the index tagged {names}; "
+                                 "deleting it would break that index. Delete or retag the index first.")
+
+
 def delete(c, repo, digest, with_children=False):
     """Delete a manifest by digest. With with_children, also delete index children no other tagged index in the repo uses."""
     check_repo(repo)
     if not DIGEST_RE.fullmatch(digest):
         raise RegistryError(400, "delete takes a digest")
+    check_not_a_child(c, repo, digest)
     if not c.delete_enabled():
         raise RegistryError(405, DELETE_OFF)
     data, mtype, _ = c.manifest(repo, digest)
@@ -277,6 +302,7 @@ def move(c, src, src_ref, dst, dst_ref):
         raise RegistryError(400, "move needs two repositories: registry:2 deletes by digest, which would remove both tags")
     if not c.delete_enabled():
         raise RegistryError(405, "nothing copied. " + DELETE_OFF)
+    check_not_a_child(c, check_repo(src), c.manifest(src, check_ref(src_ref), head=True)[2])  # before anything is copied
     digest = copy(c, src, src_ref, dst, dst_ref)
     if c.manifest(dst, dst_ref, head=True)[2] != digest:
         raise RegistryError(502, "destination digest differs, source kept")
