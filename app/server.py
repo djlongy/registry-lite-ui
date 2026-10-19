@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+import select
 import signal
 import socket
 import ssl
@@ -228,6 +229,7 @@ def make_handler(cfg):
         def events(self):
             """Server-Sent Events: a message with the new sequence number on each change, a comment every 15 s as heartbeat."""
             if not cfg.sse_slots.acquire(blocking=False):
+                cfg.errors.error("sse", "live client limit reached, further clients get 503")
                 return self.reply(503, {"error": "too many live clients"})
             try:
                 self.send_response(200)
@@ -237,15 +239,23 @@ def make_handler(cfg):
                 seq = cfg.state.seq
                 self.wfile.write(b"retry: 5000\n\n")
                 self.wfile.flush()
-                while True:
-                    now = cfg.state.wait(seq, 15)
-                    self.wfile.write(b": hb\n\n" if now == seq else b"data: %d\n\n" % now)
-                    self.wfile.flush()
+                idle = 0
+                while not self.hung_up():
+                    now = cfg.state.wait(seq, 1)
+                    idle = idle + 1 if now == seq else 0
+                    if idle in (0, 15):  # a change, or 15 quiet seconds: heartbeat
+                        self.wfile.write(b": hb\n\n" if now == seq else b"data: %d\n\n" % now)
+                        self.wfile.flush()
+                        idle = 0
                     seq = now
             except OSError:
                 pass  # client went away
             finally:
                 cfg.sse_slots.release()
+
+        def hung_up(self):
+            """A browser sends nothing after its request, so a readable socket means it has gone. Frees the slot at once."""
+            return bool(select.select([self.connection], [], [], 0)[0])
 
         def read_json(self):
             """The body of a POST: a plain Content-Length of at most MAX_BODY bytes, all read within BODY_SECS."""
@@ -314,7 +324,7 @@ def make_handler(cfg):
 
         def log_request(self, code="-", size="-"):  # one line per request: no query, headers, cookies or body
             path = self.path.split("?")[0]
-            log.log(logging.DEBUG if path == "/healthz" else logging.INFO, "%s %s %s", self.command, ascii(path)[1:-1], code)
+            log.log(logging.DEBUG if path == "/healthz" or (code == 503 and path == "/api/events") else logging.INFO, "%s %s %s", self.command, ascii(path)[1:-1], code)
 
         def log_message(self, fmt, *args):
             log.debug(fmt, *args)

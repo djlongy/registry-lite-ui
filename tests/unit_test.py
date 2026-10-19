@@ -496,6 +496,16 @@ class BigRepo(unittest.TestCase):
         self.assertEqual(list(st.events), [])
 
 
+    def test_empty_repositories_and_exact_multiples_do_not_stall(self):
+        reg = FakeRegistry({"a": {f"t{i}": f"d{i}" for i in range(4)}, "b": {}, "c": {"1": "x"}, "d": {}})
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st, max_tags=4)
+        for _ in range(4):
+            p.cycle()
+        self.assertTrue(st.baselined)
+        self.assertEqual(len(st.tags), 5)
+
+
 class Http(unittest.TestCase):
     def serve(self, env=None, conns=8):
         cfg = S.Config(env or {})
@@ -537,6 +547,21 @@ class Http(unittest.TestCase):
         out = self.talk(port, b"PUT /api/copy HTTP/1.0\r\nHost: t\r\n\r\n")
         self.assertIn(b" 405 ", out.split(b"\r\n")[0])
         self.assertIn(b"application/json", out)
+
+    def test_sse_slot_is_freed_when_the_client_hangs_up(self):
+        cfg, port = self.serve({"UI_MAX_SSE": "1"})
+
+        def connect():
+            c = socket.create_connection(("127.0.0.1", port), timeout=5)
+            self.addCleanup(c.close)
+            c.sendall(b"GET /api/events HTTP/1.0\r\nHost: t\r\n\r\n")
+            return c, c.recv(200).split(b"\r\n")[0]
+        first, status = connect()
+        self.assertIn(b" 200 ", status)
+        self.assertIn(b" 503 ", connect()[1])  # the only slot is taken
+        first.close()
+        time.sleep(1.5)  # not the 15 s heartbeat
+        self.assertIn(b" 200 ", connect()[1])
 
     def test_host_names(self):
         self.assertEqual([S.host_only(h) for h in ("ui:8080", "UI.Example", "[::1]:8080", "[::1]", "localhost:80")],

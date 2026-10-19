@@ -131,7 +131,7 @@ case "${1:-all}" in
   ui) ui ;;
   gc) gc ;;
   recent) recent ;;
-  all) clients up; ui; recent; gc ;;
+  all) clients up; clients down; ui; recent; gc ;;
 esac
 echo "failures: $fails"
 exit $((fails > 0))
