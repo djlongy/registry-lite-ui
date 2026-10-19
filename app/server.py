@@ -265,7 +265,10 @@ class Handler(BaseHTTPRequestHandler):
         if int(n) > MAX_BODY:
             raise R.RegistryError(413, "body too large")
         self.server.deadline(self.request, BODY_SECS)
-        return json.loads(self.rfile.read(int(n)))
+        try:
+            return json.loads(self.rfile.read(int(n)))
+        finally:  # the operation that follows may take longer than the body deadline
+            self.server.deadline(self.request)
 
     def mutate(self, handler):
         if self.cfg.readonly:

@@ -404,6 +404,16 @@ class Hostile(unittest.TestCase):
                 c.manifest("a", ref)
         self.assertEqual(c.manifest("a", good)[2], good)
 
+    def test_sha512_manifests_are_hashed_too(self):
+        body = b'{"schemaVersion":2}'
+        lie = "sha512:" + "ab" * 64
+        good = "sha512:" + __import__("hashlib").sha512(body).hexdigest()
+        c = self.upstream({"/v2/a/manifests/t": (200, {"Docker-Content-Digest": lie}, body),
+                           "/v2/a/manifests/u": (200, {"Docker-Content-Digest": good}, body)})
+        with self.assertRaises(R.RegistryError):
+            c.manifest("a", "t")
+        self.assertEqual(c.manifest("a", "u")[2], good)
+
     def test_digests_from_a_manifest_are_checked(self):
         bad = json.dumps({"manifests": [{"digest": "../../x"}], "layers": [{"digest": "sha256:zz"}]}).encode()
         with self.assertRaises(R.RegistryError):
@@ -420,6 +430,29 @@ class Hostile(unittest.TestCase):
         self.assertNotIn("canary", e.exception.message)
         self.assertNotIn("cmVnd", e.exception.message)
 
+    def test_many_small_pages_are_cut(self):
+        table = {}
+        for i in range(30):
+            link = {"Link": f'</v2/_catalog?last={i + 1}>; rel="next"'}
+            table["/v2/_catalog?n=1000" if i == 0 else f"/v2/_catalog?last={i}"] = (200, link, json.dumps({"repositories": [f"r{i}/{j}" for j in range(1000)]}).encode())
+        c = self.upstream(table)
+        old, R.MAX_ITEMS = R.MAX_ITEMS, 5000
+        self.addCleanup(setattr, R, "MAX_ITEMS", old)
+        with self.assertRaises(R.RegistryError) as e:
+            c.catalog()
+        self.assertIn("too large", e.exception.message)
+
+    def test_credentials_are_redacted_before_the_message_is_cut(self):
+        pw = "p" * 16 + "q" * 16
+        msg = "x" * 140 + pw  # the password straddles the old 200 character cut
+        u = Upstream({"/v2/a/manifests/t": (500, {}, json.dumps({"errors": [{"code": "X", "message": msg}]}).encode())})
+        self.addCleanup(u.close)
+        c = R.Client(u.url, "reguser", pw)
+        with self.assertRaises(R.RegistryError) as e:
+            c.manifest("a", "t")
+        self.assertNotIn("ppppp", e.exception.message)
+        self.assertIn("[redacted]", e.exception.message)
+
     def test_catalog_drops_invalid_names_and_header_digest_is_checked(self):
         c = self.upstream({"/v2/_catalog?n=1000": (200, {}, json.dumps({"repositories": ["ok/app", "BAD", "x" * 300, 5]}).encode()),
                            "/v2/ok/app/manifests/t": (200, {"Docker-Content-Digest": "not-a-digest"}, b"{}")})
@@ -432,7 +465,7 @@ class Hostile(unittest.TestCase):
             R.json_load(b"[1]")
 
     def test_registry_url_is_validated(self):
-        for bad in ["file:///etc/passwd", "ftp://h", "http://u:p@h:5000", "http://h:5000/x", "http://h?x=1", "registry:5000"]:
+        for bad in ["file:///etc/passwd", "ftp://h", "http://u:p@h:5000", "http://:p@h:5000", "http://h:5000#frag", "http://h:5000/x", "http://h?x=1", "registry:5000"]:
             with self.assertRaises(ValueError, msg=bad):
                 R.Client(bad)
 
@@ -562,6 +595,17 @@ class Http(unittest.TestCase):
         first.close()
         time.sleep(1.5)  # not the 15 s heartbeat
         self.assertIn(b" 200 ", connect()[1])
+
+    def test_a_slow_operation_keeps_its_connection(self):
+        old, S.BODY_SECS = S.BODY_SECS, 1
+        self.addCleanup(setattr, S, "BODY_SECS", old)
+        orig = R.copy
+        R.copy = lambda *a: (time.sleep(3), D("a"))[1]
+        self.addCleanup(setattr, R, "copy", orig)
+        cfg, port = self.serve()
+        body = json.dumps({"src": "a", "srcRef": "t", "dst": "b", "dstRef": "t"})
+        out = self.post(port, cfg.csrf, str(len(body)), body.encode())
+        self.assertIn(b" 200 ", out.split(b"\r\n")[0])
 
     def test_host_names(self):
         self.assertEqual([S.host_only(h) for h in ("ui:8080", "UI.Example", "[::1]:8080", "[::1]", "localhost:80")],

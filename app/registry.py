@@ -19,6 +19,8 @@ DIGEST_RE = re.compile(r"sha256:[a-f0-9]{64}|sha512:[a-f0-9]{128}")
 
 MAX_BODY = 8 << 20  # largest registry response read into memory; blobs are streamed instead
 MAX_PAGES = 1000  # pages followed for one catalog or tag list
+MAX_ITEMS, MAX_LIST_BYTES = 100_000, 16 << 20  # entries and raw bytes kept for one catalog or tag list
+MAX_MESSAGE = 300  # registry error text passed on, cut after the credentials are removed
 MAX_DEPTH = 3  # index nesting followed by copy
 
 INDEX_TYPES = {
@@ -56,6 +58,12 @@ def check_digest(digest):
     return digest
 
 
+def hashed(data, like):
+    """The digest of data in the algorithm `like` names (sha256: or sha512:)."""
+    alg = like.split(":")[0]
+    return f"{alg}:{hashlib.new(alg, data).hexdigest()}"
+
+
 def check_ref(ref):
     """A reference is a tag or a digest."""
     if not (TAG_RE.fullmatch(ref) or DIGEST_RE.fullmatch(ref)):
@@ -71,18 +79,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class Client:
     def __init__(self, base, user="", password="", cafile=None):
         u = urllib.parse.urlsplit(base)
-        if u.scheme not in ("http", "https") or not u.hostname or u.username or u.path.strip("/") or u.query:
-            raise ValueError("REGISTRY_URL must be http(s)://host[:port] with no credentials or path")
+        if u.scheme not in ("http", "https") or not u.hostname or "@" in u.netloc or u.path.strip("/") or u.query or u.fragment:
+            raise ValueError("REGISTRY_URL must be http(s)://host[:port] with no credentials, path, query or fragment")
         self.base = base.rstrip("/")
         self.auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode() if user else ""
         self.secrets = [s for s in (self.auth[6:], password) if len(s) > 3]
         if user and u.scheme == "http":
             log.warning("registry credentials are sent over plain HTTP, use https in REGISTRY_URL outside a private network")
         # Verification is always on. cafile may be a CA or the self-signed leaf itself.
-        ctx = ssl.create_default_context()
-        if cafile:
-            ctx.load_verify_locations(cafile=cafile)
-        tls = urllib.request.HTTPSHandler(context=ctx)
+        # With a cafile, only that file is trusted, not the system store as well.
+        tls = urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=cafile))
         self.opener = urllib.request.build_opener(NoRedirect, tls)
 
     def open(self, method, path, headers=None, body=None, timeout=30):
@@ -111,17 +117,20 @@ class Client:
             if len(data) > MAX_BODY:
                 raise RegistryError(502, "registry response too large")
             if r.status not in ok:
-                raise RegistryError(r.status, self.redact(describe(r.status, data)))
+                raise RegistryError(r.status, self.redact(describe(r.status, data))[:MAX_MESSAGE])
             return r.status, r.headers, data
 
     def paged(self, path, key):
-        out, seen = [], set()
+        out, seen, size = [], set(), 0
         while path:
             if path in seen or len(seen) >= MAX_PAGES:
                 raise RegistryError(502, "registry paging does not end")
             seen.add(path)
             _, h, data = self.call("GET", path)
+            size += len(data)
             out += (json_load(data).get(key) or [])
+            if len(out) > MAX_ITEMS or size > MAX_LIST_BYTES:
+                raise RegistryError(502, "registry list is too large")
             link = re.match(r'<([^>]+)>', h.get("Link", ""))
             path = local_path(link.group(1)) if link else None
         return out
@@ -141,10 +150,9 @@ class Client:
         if digest:
             check_digest(digest)
         if not head:
-            local = SHA256 + hashlib.sha256(data).hexdigest()
-            if digest.startswith(SHA256) and digest != local or ref.startswith(SHA256) and ref != local:
+            if any(DIGEST_RE.fullmatch(claim) and claim != hashed(data, claim) for claim in (digest, ref)):
                 raise RegistryError(502, "registry returned a manifest that does not match its digest")
-            digest = digest or local
+            digest = digest or hashed(data, SHA256)
         return data, h.get("Content-Type", "").split(";")[0], digest
 
     def delete_enabled(self):
@@ -183,7 +191,7 @@ def json_load(data):
 def describe(status, data):
     try:
         e = json_load(data)["errors"][0]
-        return f"registry said {status} {e.get('code', '')}: {str(e.get('message', ''))[:200]}"
+        return f"registry said {status} {e.get('code', '')}: {e.get('message', '')}"
     except (KeyError, IndexError, RegistryError, TypeError):
         return f"registry said {status}"
 
