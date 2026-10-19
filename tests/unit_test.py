@@ -616,5 +616,81 @@ class TlsOverflow(unittest.TestCase):
         self.assertEqual(c.call("GET", "/v2/x", ok=(404,))[0], 404)
 
 
+
+class Routes(unittest.TestCase):
+    """The JSON API handlers, called directly against a fake registry client."""
+    def setUp(self):
+        class C(FakeClient):
+            tags = lambda self, repo: ["latest", "other"]  # noqa: E731
+            delete_enabled = lambda self: True  # noqa: E731
+            catalog = lambda self: ["b/app", "a/app"]  # noqa: E731
+
+            def call(self, method, path, headers=None, body=None, ok=(200,)):
+                super().call(method, path)
+                if method != "GET":
+                    return 201, {}, b""
+                return 200, {}, b'{"os":"linux","architecture":"arm64","extra":1}'
+        self.cfg = S.Config({})
+        self.cfg.client = C()
+        self.get, self.post = S.routes(self.cfg)
+
+    def test_reads(self):
+        self.assertEqual(self.get["/api/repos"]({}), ["a/app", "b/app"])
+        tags = self.get["/api/tags"]({"repo": ["a/app"]})
+        self.assertEqual([t["tag"] for t in tags], ["latest", "other"])
+        with self.assertRaises(R.RegistryError):
+            self.get["/api/tags"]({})
+        self.assertEqual(self.get["/api/recent"]({"limit": ["-5"]})["events"], [])
+        self.assertTrue(self.get["/api/config"]({})["deleteEnabled"])
+
+    def test_manifest_views(self):
+        idx = self.get["/api/manifest"]({"repo": ["a/app"], "ref": ["latest"]})
+        self.assertTrue(idx["index"])
+        self.assertEqual(len(idx["platforms"]), 2)
+        img = S.view_manifest(self.cfg.client, "a/app", D("b"))
+        self.assertEqual((img["platform"], len(img["layers"])), ({"os": "linux", "architecture": "arm64"}, 1))
+
+    def test_writes_wake_the_poller(self):
+        woken = []
+        self.cfg.poller = type("Poller", (), {"wake": lambda self: woken.append(1)})()
+        body = {"src": "a/app", "srcRef": "latest", "dst": "c/app", "dstRef": "v1"}
+        self.assertEqual(self.post["/api/copy"](body)["digest"], D("a"))
+        self.assertIn("deleted", self.post["/api/delete"]({"repo": "a/app", "digest": D("a")}))
+        self.assertEqual(len(woken), 2)
+        with self.assertRaises(KeyError):
+            self.post["/api/copy"]({"src": "a/app"})
+
+
+class Stream(unittest.TestCase):
+    def test_refused_mount_streams_the_blob(self):
+        calls = []
+
+        class Body:
+            status, headers = 200, {"Content-Length": "3"}
+            __enter__ = lambda self: self  # noqa: E731
+            __exit__ = lambda self, *a: None  # noqa: E731
+
+        class C:
+            def call(self, method, path, headers=None, body=None, ok=(200,)):
+                calls.append((method, path))
+                return (202, {"Location": "http://other.example/v2/d/app/blobs/uploads/u1?_state=x"}, b"") if "mount" in path else (ok[0], {"Location": "/v2/d/app/blobs/uploads/u2"}, b"")
+
+            def open(self, method, path, headers=None, body=None, timeout=30):
+                calls.append((method, path))
+                return Body()
+        R.copy_blob(C(), "s/app", "d/app", D("1"))
+        self.assertEqual([m for m, _ in calls], ["POST", "DELETE", "POST", "GET", "PUT"])
+        self.assertEqual(calls[1][1], "/v2/d/app/blobs/uploads/u1?_state=x")  # the host of Location is dropped
+        self.assertTrue(calls[-1][1].endswith(f"u2?digest={D('1')}"))
+
+    def test_move_verifies_then_deletes_the_source(self):
+        class C(FakeClient):
+            delete_enabled = lambda self: True  # noqa: E731
+            tags = lambda self, repo: []  # noqa: E731
+        c = C()
+        self.assertEqual(R.move(c, "s/app", "latest", "d/app", "latest"), [D("a"), D("b"), D("c")])
+        self.assertEqual([p for m, p in c.calls if m == "DELETE"][0], f"/v2/s/app/manifests/{D('a')}")
+
+
 if __name__ == "__main__":
     unittest.main()
