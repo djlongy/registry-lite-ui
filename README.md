@@ -175,6 +175,15 @@ Built to run unattended for years without a restart.
 - **TLS.** The registry client always verifies the certificate. The UI listener is HTTP unless `UI_TLS_CERT` and `UI_TLS_KEY` are set, and it never serves both on one port.
 - **Not covered.** No audit log beyond the access line per request, no per-user authorisation, no token-auth registries.
 
+## Security review
+
+Reviewed on 2026-10-19 over three rounds, each fix checked again by the reviewers that raised it.
+
+- **Reviewers.** GPT-6 Astra and Grok 4.7 as independent read-only security assessments with reproductions (a third reviewer, Claude Fable 5.1, was asked but could not run: its session had expired). A self-hosted Kodus review of each changed file (no findings; one file's last pass did not finish). SonarQube with a blocking quality gate: gate OK, 0 security hotspots, 2 findings reviewed and marked false positive (plain HTTP is the documented default, and `create_default_context(cafile=...)` keeps verification on).
+- **Found and fixed.** 0 critical, 6 high, 15 medium, 5 of 6 low. Highlights: unbounded registry reads and pagination, unframed request bodies, slow clients holding connection slots, a TLS handshake blocking `accept`, a leaked connection slot, deleting an index also deleting an independently tagged image, a poll budget that did not bound a large repository, DNS rebinding with no default Host allowlist, OIDC admitting every email domain, credentials echoed in registry error text, and manifests not hashed against their digest.
+- **Declined.** Pinning `actions/checkout` by commit in `.github/workflows/ci.yml` (low): the review's push token could not update workflow files. Opt-in `UI_ALLOWED_HOSTS` outside compose stays opt-in, with a startup warning, because the UI cannot know its public name.
+- **Residual.** No per-user authorisation, no audit log, no per-client rate limit on the UI itself (put it behind an auth override, which rate limits at nginx).
+
 ## Tests
 
 `python3 -m unittest discover -s tests -p 'unit_test.py'` covers names, copy ordering and CSRF. `tests/e2e.sh` runs the compose checks and `tests/oidc.sh` the dex login, `tests/soak.sh` the long-run check, `tests/tls.sh` the throwaway-certificate checks. Output from the last runs is in `tests/evidence/`: push and pull with the UI up and down, copy, move, delete, GC (a 19 MiB volume reduction), basic auth, registry auth and OIDC. The LDAP override, the OIDC TLS override (config renders only) and the stream fallback for refused blob mounts have no live test.
