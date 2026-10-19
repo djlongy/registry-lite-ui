@@ -33,7 +33,7 @@ jobs:
           curl -fs localhost:8080/api/repos | grep -q ci/busybox
           curl -fs 'localhost:8080/api/tags?repo=ci/busybox' | grep -q '"tag": "1"'
           podman logs ui
-          podman inspect --format '{{.Config.Healthcheck}}' localhost/ui:ci | grep -q 8080
+          podman healthcheck run ui
       - name: Export one archive per platform
         if: github.event_name == 'push'
         run: |
