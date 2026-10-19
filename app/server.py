@@ -25,7 +25,22 @@ log = logging.getLogger("ui")
 STATIC = Path(__file__).parent / "static"
 FILES = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"), "/style.css": ("style.css", "text/css"),
          "/favicon.svg": ("favicon.svg", "image/svg+xml")}
+PATH_RE = re.compile(r"/[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*/?")
+VOLUME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+def valid_storage(value):
+    """An absolute path or a volume name, with nothing a shell or a mount option would read as syntax, because it is shown inside a command to copy."""
+    if len(value) > 255:
+        return False
+    if value.startswith("/"):
+        return bool(PATH_RE.fullmatch(value)) and ".." not in value.split("/")
+    return bool(VOLUME_RE.fullmatch(value))
+
+
 HOST_RE = re.compile(r"[A-Za-z0-9.-]+(:\d{1,5})?|\[[0-9A-Fa-f:]+\](:\d{1,5})?")
+DEFAULT_ENVIRONMENTS = "dev,test,uat,staging,prod"  # the lifecycle stages, in order, that the copy and move dialogs offer as promote shortcuts
+MAX_ENVIRONMENTS = 12
 MAX_TAGNAMES = 5000  # tag names /api/tagnames returns, so the answer stays small on a very large registry
 MAX_BODY = 4096  # bytes of JSON accepted on a POST
 HEALTHZ = "/healthz"
@@ -43,6 +58,13 @@ class Config:
         self.client = R.Client(self.registry_url, env.get("REGISTRY_USER", ""), password,
                               env.get("REGISTRY_CA_FILE") or None)
         self.readonly = env.get("UI_READONLY", "").lower() in ("1", "true", "yes")
+        stages = [e.strip() for e in (env.get("UI_ENVIRONMENTS") or DEFAULT_ENVIRONMENTS).split(",") if e.strip()]
+        self.environments = list(dict.fromkeys(stages))  # in lifecycle order, each a path prefix such as prod or team-a/prod
+        if len(self.environments) > MAX_ENVIRONMENTS or not all(R.valid_repo(e) for e in self.environments):
+            raise ValueError(f"UI_ENVIRONMENTS must be at most {MAX_ENVIRONMENTS} repository-style path prefixes in order, such as dev,test,prod")
+        self.registry_storage = env.get("UI_REGISTRY_STORAGE", "").strip()  # display only: where the registry keeps its data, for the garbage collection command
+        if self.registry_storage and not valid_storage(self.registry_storage):
+            raise ValueError("UI_REGISTRY_STORAGE must be an absolute path such as /data/registry or a volume name")
         self.registry_host = env.get("UI_REGISTRY_HOST", "").strip()  # what clients type to reach the registry, shown in the pull and push commands
         if self.registry_host and not HOST_RE.fullmatch(self.registry_host):
             raise ValueError("UI_REGISTRY_HOST must be host or host:port, without a scheme or path")
@@ -185,9 +207,12 @@ def routes(cfg):
         repo, digest = R.check_repo(one(q, "repo")), one(q, "digest")
         if not R.DIGEST_RE.fullmatch(digest):
             raise R.RegistryError(400, "digest expected")
-        found = R.survey(c, repo, digest)[0]
+        found, kept = R.survey(c, repo, digest)
+        data, mtype, _ = c.manifest(repo, digest)
+        kids = set(R.children(data, mtype))  # what "also delete index children" would remove: those no other tagged manifest keeps
         tags = sorted(found)
-        return {"parents": [{"tag": t, "platform": found[t]} for t in tags[:5]], "more": max(0, len(tags) - 5)}
+        return {"parents": [{"tag": t, "platform": found[t]} for t in tags[:5]], "more": max(0, len(tags) - 5),
+                "children": len(kids), "removable": len(kids - kept)}
 
     def recent(q):
         return cfg.state.snapshot(max(0, min(int(q.get("limit", ["200"])[0]), cfg.state.max_events)))
@@ -210,7 +235,7 @@ def routes(cfg):
         "/api/config": lambda q: {"csrf": cfg.csrf, "readonly": cfg.readonly, "deleteEnabled": c.delete_enabled(),
                                   "registry": cfg.registry_url,
                                   "registryHost": cfg.registry_host or urllib.parse.urlsplit(cfg.registry_url).netloc,
-                                  "registryHostSet": bool(cfg.registry_host)},
+                                  "registryHostSet": bool(cfg.registry_host), "environments": cfg.environments, "registryStorage": cfg.registry_storage},
         "/api/repos": lambda q: sorted(c.catalog()),
         "/api/tags": tags,
         "/api/recent": recent,

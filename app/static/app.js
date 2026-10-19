@@ -18,12 +18,16 @@ const pref = {
   selected: (v) => typeof v === "string" && v.startsWith("/") && v.length < 300,
   sidebar: (v) => typeof v === "number" && v >= SIDEBAR[0] && v <= SIDEBAR[1],
 };
+function prefValid(k, v) {
+  if (pref[k]) return pref[k](v);
+  if (CHOICES[k]) return CHOICES[k].includes(v);
+  return typeof v === typeof DEFAULTS[k];
+}
 function loadPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem("registry-lite-ui") || "{}");
     for (const k of Object.keys(DEFAULTS)) {
-      const ok = pref[k] ? pref[k](p[k]) : CHOICES[k] ? CHOICES[k].includes(p[k]) : typeof p[k] === typeof DEFAULTS[k];
-      if (ok) prefs[k] = p[k];
+      if (prefValid(k, p[k])) prefs[k] = p[k];
     }
   } catch (e) { /* blocked or corrupt: use defaults */ }
 }
@@ -74,6 +78,7 @@ const ICONS = {
   moon: [["s", "M13 9.4A5.4 5.4 0 0 1 6.6 3a5.4 5.4 0 1 0 6.4 6.4z"]],
   monitor: [["s", "M2.5 3h11v7.5h-11zM6 13.5h4M8 10.5v3"]],
   close: [["s", "M4 4l8 8M12 4l-8 8"]],
+  arrow: [["s", "M8 12.5v-9M4.5 7L8 3.5 11.5 7"]],
   clock: [["s", "M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zM8 4.8V8l2.2 1.4"]],
 };
 const iconCache = new Map();
@@ -112,6 +117,9 @@ function banner(text, err) {
 
 // One dialog for every action. fields: {name, label, value, type: text|checkbox|select, options}. Resolves to the values, or null on cancel.
 let paneStale = false; // the pane changed while a dialog was open
+const modalOpen = () => !!document.querySelector("dialog[open]"); // any dialog: confirm, settings, help, copy, move or delete
+// A pane redraw that was held back while a dialog was open runs when the last one closes. (close does not bubble, so listen in the capture phase.)
+document.addEventListener("close", () => { if (paneStale && !modalOpen()) { paneStale = false; void renderPane(); } }, true);
 // A blocked dialog shows `block` as a warning and leaves Confirm disabled.
 function ask(title, lines, fields, danger, block) {
   const form = $("form");
@@ -144,10 +152,6 @@ function paged(rows, headers) {
   const out = [el("table", {}, headers ? el("tr", {}, ...headers.map((h) => el("th", { textContent: h }))) : null, ...rows.slice(0, n))];
   if (rows.length > n) out.push(el("p", {}, el("button", { textContent: `Show more (${rows.length - n} left)`, onclick: () => { shown = n + prefs.pageSize; void renderPane(); } })));
   return out;
-}
-
-function sorted(items, key) { // items sorted by recency of key(item) when the pref says so, else by name
-  return prefs.sort === "recent" ? [...items].sort((a, b) => (key(b) || 0) - (key(a) || 0) || byName(a, b)) : [...items].sort(byName);
 }
 
 // ---- Tree model ------------------------------------------------------------------------------------------------
@@ -183,7 +187,7 @@ function dropNode(n) {
   for (const t of n.tagList || []) { tree.byId.delete(t.id); for (const p of t.plats || []) tree.byId.delete(p.id); }
 }
 function pruneUp(n) { // remove a node that is no longer a repository and holds nothing
-  while (n && n.kind === "node" && !n.repo && !n.kids.size) {
+  while (n?.kind === "node" && !n.repo && !n.kids.size) {
     n.parent.kids.delete(n.name);
     n.parent.sortedKids = null;
     tree.byPath.delete(n.path);
@@ -199,7 +203,7 @@ function applyCatalog(names, flashNew) {
     const n = pathNode(p);
     if (!n.repo) { n.repo = true; changed = true; if (flashNew) flash(n); }
   }
-  for (const n of [...tree.byPath.values()]) {
+  for (const n of tree.byPath.values()) {
     if (n.repo && !want.has(n.path)) { n.repo = false; n.fresh = false; for (const t of n.tagList) { tree.byId.delete(t.id); } n.tagList = []; n.tagMap.clear(); changed = true; pruneUp(n); }
   }
   tree.names = names;
@@ -209,8 +213,12 @@ function applyCatalog(names, flashNew) {
 function kidsOf(n) {
   if (n.kind === "tag") return n.plats || [];
   if (n.kind === "plat") return [];
+  const k = folderKids(n);
+  return n.kind === "node" && n.repo ? [...k, ...n.tagList] : k;
+}
+function folderKids(n) { // the child folders and repositories, by name, kept until they change
   if (!n.sortedKids) n.sortedKids = [...n.kids.values()].sort(byName);
-  return n.kind === "node" && n.repo ? [...n.sortedKids, ...n.tagList] : n.sortedKids;
+  return n.sortedKids;
 }
 function expandable(n) {
   if (n.kind === "root") return true;
@@ -242,7 +250,8 @@ function matchSet() {
   }
   tree.tm = tm;
   tree.pathHit = hit;
-  return (tree.matches = set);
+  tree.matches = set;
+  return set;
 }
 let indexLoading = null;
 function loadTagIndex() { // one small request, made when the filter is first used and again after a change
@@ -274,23 +283,29 @@ function ensureTags(n, force) {
   scheduleTree();
   return n.loading;
 }
-function reconcileTags(n, rows, flashChanges) {
-  const seen = new Set();
-  for (const r of rows) {
-    seen.add(r.tag);
-    let t = n.tagMap.get(r.tag);
-    if (!t) {
-      t = mk("tag", `t:${n.path}:${r.tag}`, r.tag, n, { tag: r.tag, digest: r.digest, changed: r.changed, plats: null });
-      n.tagMap.set(r.tag, t);
-      if (flashChanges) flash(t);
-    } else if (t.digest !== r.digest) {
-      for (const p of t.plats || []) tree.byId.delete(p.id);
-      Object.assign(t, { digest: r.digest, plats: null });
-      if (flashChanges) flash(t);
-    }
-    t.changed = r.changed;
+function dropTag(t) {
+  tree.byId.delete(t.id);
+  for (const p of t.plats || []) tree.byId.delete(p.id);
+}
+function upsertTag(n, r, flashChanges) {
+  let t = n.tagMap.get(r.tag);
+  if (!t) {
+    t = mk("tag", `t:${n.path}:${r.tag}`, r.tag, n, { tag: r.tag, digest: r.digest, changed: r.changed, plats: null });
+    n.tagMap.set(r.tag, t);
+    if (flashChanges) flash(t);
+  } else if (t.digest !== r.digest) {
+    for (const p of t.plats || []) tree.byId.delete(p.id);
+    Object.assign(t, { digest: r.digest, plats: null });
+    if (flashChanges) flash(t);
   }
-  for (const [k, t] of n.tagMap) if (!seen.has(k)) { n.tagMap.delete(k); tree.byId.delete(t.id); for (const p of t.plats || []) tree.byId.delete(p.id); }
+  t.changed = r.changed;
+}
+function reconcileTags(n, rows, flashChanges) {
+  const seen = new Set(rows.map((r) => r.tag));
+  for (const r of rows) upsertTag(n, r, flashChanges);
+  for (const [k, t] of n.tagMap) {
+    if (!seen.has(k)) { n.tagMap.delete(k); dropTag(t); }
+  }
   n.tagList = [...n.tagMap.values()].sort(byName);
 }
 function getManifest(path, ref, digest, fresh) {
@@ -313,9 +328,13 @@ function ensurePlats(t) {
 // After our own change, reload what it touched now instead of waiting for the poller's event.
 async function touch(...paths) {
   await sync();
-  await Promise.all(paths.map((p) => { const n = tree.byPath.get(p); dropManifests(p); return n && n.repo ? ensureTags(Object.assign(n, { fresh: false }), true) : null; }));
+  await Promise.all(paths.map((p) => { const n = tree.byPath.get(p); dropManifests(p); return n?.repo ? ensureTags(Object.assign(n, { fresh: false }), true) : null; }));
 }
-function dropManifests(path) { for (const k of [...manifests.keys()]) if (k.startsWith(path + "@")) manifests.delete(k); }
+function dropManifests(path) {
+  for (const k of manifests.keys()) {
+    if (k.startsWith(path + "@")) manifests.delete(k);
+  }
+}
 
 // ---- Tree rendering ----------------------------------------------------------------------------------------------
 const RECENT = { kind: "recent", id: "recent", name: "Recent" };
@@ -343,17 +362,31 @@ function visible() {
   walk(tree.root, 0, [], 1, 1, true);
   if (filtering && tree.truncated) rows.push({ info: "Tag search covers only the first 5000 tags.", depth: 0, anc: [], last: true });
 }
-function rowEl(r) {
-  const n = r.n, guides = [];
+function guidesFor(r) { // the connector lines of a row: a vertical for each ancestor with more siblings, then the elbow
+  const guides = [];
   for (let i = 0; i < r.depth - 1; i++) guides.push(el("span", { className: "g" + (r.anc[i] ? " v" : "") }));
   if (r.depth) guides.push(el("span", { className: "g e" + (r.last ? " last" : "") }));
+  return guides;
+}
+function iconFor(n, open) {
+  if (n.kind === "root") return icon("registry");
+  if (n.kind === "tag") return icon("whale", "whale");
+  if (n.kind === "plat") return icon("chip");
+  return icon(open ? "folderOpen" : "folder");
+}
+function rowTitle(n) {
+  if (n.kind === "root") return cfg.registry || "";
+  return n.kind === "node" ? n.path : n.name;
+}
+const rowLabel = (n) => (n.kind === "root" ? (cfg.registry || "Registry").replace(/^https?:\/\//, "") : n.name);
+function rowEl(r) {
+  const n = r.n, guides = guidesFor(r);
   if (r.info) return el("div", { className: "row info", role: "none" }, ...guides, el("span", { className: "chev" }), el("span", { className: "lbl", textContent: r.info }));
   const open = expandable(n) && isOpen(n);
-  const ico = n.kind === "root" ? icon("registry") : n.kind === "tag" ? icon("whale", "whale") : n.kind === "plat" ? icon("chip") : icon(open ? "folderOpen" : "folder");
   const row = el("div", {
-    className: "row", role: "treeitem", id: "ti-" + n.id, tabIndex: n.id === tree.focus ? 0 : -1, title: n.kind === "root" ? cfg.registry || "" : n.kind === "node" ? n.path : n.name,
+    className: "row", role: "treeitem", id: "ti-" + n.id, tabIndex: n.id === tree.focus ? 0 : -1, title: rowTitle(n),
     "aria-level": r.depth + 1, "aria-posinset": r.pos, "aria-setsize": r.count, "aria-selected": String(n.id === tree.sel),
-  }, ...guides, el("span", { className: "chev" }, expandable(n) ? icon("chev") : null), ico, el("span", { className: "lbl", textContent: n.kind === "root" ? (cfg.registry || "Registry").replace(/^https?:\/\//, "") : n.name }));
+  }, ...guides, el("span", { className: "chev" }, expandable(n) ? icon("chev") : null), iconFor(n, open), el("span", { className: "lbl", textContent: rowLabel(n) }));
   row.dataset.id = n.id;
   if (expandable(n)) row.setAttribute("aria-expanded", String(open));
   const t = tree.flashes.get(n.id);
@@ -369,6 +402,19 @@ function recentEl() {
 let rowCache = new Map(); // rows are reused between renders when nothing about them changed
 let treeQueued = false;
 function scheduleTree() { if (!treeQueued) { treeQueued = true; requestAnimationFrame(() => { treeQueued = false; renderTree(); }); } }
+function rowSig(r) { // what a row looks like, so an unchanged one is reused
+  const n = r.n;
+  const own = n ? [isOpen(n), n.kind === "node" && n.repo, n.id === tree.sel, n.id === tree.focus, n.name, expandable(n)] : [];
+  return [r.depth, r.anc.join(""), r.last, r.pos, r.count, ...own].join("|");
+}
+function cachedRow(r, keep) {
+  const id = r.n ? r.n.id : "info:" + r.depth + ":" + r.info;
+  const flashing = !!r.n && tree.flashes.has(r.n.id);
+  const sig = rowSig(r), old = rowCache.get(id);
+  const e = old?.sig === sig && !flashing && !old.flashing ? old.e : rowEl(r);
+  keep.set(id, { sig, e, flashing });
+  return e;
+}
 function renderTree() {
   const box = $("tree");
   const hadFocus = box.contains(document.activeElement);
@@ -378,15 +424,7 @@ function renderTree() {
   ids.add("recent");
   if (!tree.focus || !ids.has(tree.focus)) tree.focus = ids.has(tree.sel) ? tree.sel : "recent";
   const keep = new Map();
-  const els = rows.map((r) => {
-    const id = r.n ? r.n.id : "info:" + r.depth + ":" + r.info;
-    const flashing = r.n && tree.flashes.has(r.n.id);
-    const sig = [r.depth, r.anc.join(""), r.last, r.pos, r.count, r.n && isOpen(r.n), r.n && r.n.kind === "node" && r.n.repo, r.n && r.n.id === tree.sel, r.n && r.n.id === tree.focus, r.n && r.n.name, r.n && expandable(r.n)].join("|");
-    const old = rowCache.get(id);
-    const e = old && old.sig === sig && !flashing && !old.flashing ? old.e : rowEl(r);
-    keep.set(id, { sig, e, flashing });
-    return e;
-  });
+  const els = rows.map((r) => cachedRow(r, keep));
   rowCache = keep;
   box.replaceChildren(recentEl(), ...els);
   box.scrollTop = top;
@@ -416,43 +454,68 @@ function toggle(n, force) {
   renderTree();
 }
 const rowOf = (target) => target.closest(".row[data-id]");
-function entryOf(id) { return id === "recent" ? { n: RECENT } : rows.find((r) => r.n && r.n.id === id); }
 $("tree").addEventListener("click", (e) => {
   const row = rowOf(e.target);
   if (!row) return;
   const n = row.dataset.id === "recent" ? RECENT : tree.byId.get(row.dataset.id);
   if (!n) return;
-  if (e.target.closest(".chev")) { tree.focus = n.id; if (expandable(n)) toggle(n); else renderTree(); return; }
+  if (e.target.closest(".chev")) {
+    tree.focus = n.id;
+    if (expandable(n)) {
+      toggle(n);
+    } else {
+      renderTree();
+    }
+    return;
+  }
   go(n);
 });
 $("tree").addEventListener("dblclick", (e) => {
   const row = rowOf(e.target), n = row && tree.byId.get(row.dataset.id);
   if (n && expandable(n) && !e.target.closest(".chev")) toggle(n);
 });
+// Where an arrow key goes from list[i], for the main tree and the folder picker. ops: {expandable, isOpen, setOpen}.
+// Returns the node to focus, null to stay (opening or closing is done here), or undefined for a key it does not handle.
+function arrowTarget(key, list, i, ops) {
+  switch (key) {
+    case "ArrowDown": return list[Math.min(i + 1, list.length - 1)].n;
+    case "ArrowUp": return list[Math.max(i - 1, 0)].n;
+    case "Home": return list[0].n;
+    case "End": return list.at(-1).n;
+    case "ArrowRight": return arrowRight(list, i, ops);
+    case "ArrowLeft": return arrowLeft(list[i].n, ops);
+    default: return undefined;
+  }
+}
+function arrowRight(list, i, ops) {
+  const n = list[i].n;
+  if (!ops.expandable(n)) return null;
+  if (!ops.isOpen(n)) { ops.setOpen(n, true); return null; }
+  const next = list[i + 1];
+  return next && next.depth > list[i].depth ? next.n : null;
+}
+function arrowLeft(n, ops) {
+  if (ops.expandable(n) && ops.isOpen(n)) { ops.setOpen(n, false); return null; }
+  return n.parent || null;
+}
+const treeOps = { expandable, isOpen, setOpen: toggle };
+function focusRow(n) {
+  tree.focus = n.id;
+  renderTree();
+  const row = $("ti-" + n.id);
+  row?.focus();
+  row?.scrollIntoView({ block: "nearest" });
+}
 $("tree").addEventListener("keydown", (e) => {
   const row = rowOf(e.target);
   if (!row || e.altKey || e.ctrlKey || e.metaKey) return;
   const list = [{ n: RECENT }, ...rows.filter((r) => r.n)];
   const i = list.findIndex((r) => r.n.id === row.dataset.id);
-  const cur = list[i], n = cur.n;
-  let to = null;
-  switch (e.key) {
-    case "ArrowDown": to = list[Math.min(i + 1, list.length - 1)].n; break;
-    case "ArrowUp": to = list[Math.max(i - 1, 0)].n; break;
-    case "Home": to = list[0].n; break;
-    case "End": to = list[list.length - 1].n; break;
-    case "ArrowRight":
-      if (n !== RECENT && expandable(n)) { if (!isOpen(n)) { toggle(n, true); return e.preventDefault(); } to = list[i + 1] && list[i + 1].depth > cur.depth ? list[i + 1].n : null; }
-      break;
-    case "ArrowLeft":
-      if (n !== RECENT && expandable(n) && isOpen(n)) { toggle(n, false); return e.preventDefault(); }
-      to = n.parent && n.parent !== tree.root.parent ? n.parent : null;
-      break;
-    case "Enter": case " ": e.preventDefault(); return go(n);
-    default: return;
-  }
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(list[i].n); return; }
+  const to = arrowTarget(e.key, list, i, treeOps);
+  if (to === undefined) return;
   e.preventDefault();
-  if (to) { tree.focus = to.id; renderTree(); $("ti-" + to.id)?.focus(); $("ti-" + to.id)?.scrollIntoView({ block: "nearest" }); }
+  if (to) focusRow(to);
 });
 let filterTimer = 0;
 $("filter").addEventListener("input", () => {
@@ -486,26 +549,43 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") drawer(false); });
 
 // ---- Command helpers: Pull, Push and Configure tabs, each a code block with a Copy button ------------------------------
 let cmdTab = "pull";
+// Copies with the clipboard API. Where it is missing (a page that is neither localhost nor HTTPS) the text is selected instead,
+// and false tells the caller to ask the user to press Ctrl/Cmd+C.
 async function copyText(text, node) {
-  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; } } catch (e) { /* fall back to selecting */ }
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) { /* refused: fall back to selecting */ }
+  }
   const range = document.createRange(), sel = getSelection();
   range.selectNodeContents(node);
   sel.removeAllRanges();
   sel.addRange(range);
-  try { return document.execCommand("copy"); } catch (e) { return false; }
+  return false;
 }
 // A value with a small copy button beside it: the text alone, no command around it.
-function copyValue(text, label) {
-  const value = code(text);
+// An icon button with its "Copied" note. node is what gets selected when the clipboard API is missing, so it must hold the copied text.
+function copyControls(text, label, node) {
   let timer = 0;
   const done = el("span", { className: "done", "aria-live": "polite" });
   const btn = el("button", { type: "button", className: "iconbtn", "aria-label": label, title: label }, icon("copy"));
-  btn.onclick = async () => {
-    done.textContent = (await copyText(text, value)) ? "Copied" : "Press Ctrl+C";
+  btn.onclick = async (e) => {
+    e.stopPropagation(); // a copy icon in a table row must not act on the row
+    done.textContent = (await copyText(text, node)) ? "Copied" : "Press Ctrl/Cmd+C";
     clearTimeout(timer);
     timer = setTimeout(() => { done.textContent = ""; }, 1600);
   };
-  return el("span", { className: "copyval" }, value, btn, done);
+  return [btn, done];
+}
+function copyValue(text, label, shown) { // shown: what to display when it is shorter than what is copied
+  const value = code(shown || text);
+  return el("span", { className: "copyval" }, value, ...copyControls(text, label, value));
+}
+// A copy icon that shows on row hover or focus, with the full text kept (invisibly) as the thing to select.
+function rowCopy(text, label) {
+  const full = el("span", { className: "vh", textContent: text, "aria-hidden": "true" }); // selectable, but not read out twice
+  return el("span", { className: "rowcopy" }, ...copyControls(text, label, full), full);
 }
 function codeBlock(label, lines) {
   const text = lines.join("\n");
@@ -516,7 +596,7 @@ function codeBlock(label, lines) {
   let timer = 0;
   const btn = el("button", { type: "button", className: "copy", textContent: "Copy", "aria-label": "Copy " + label, "aria-live": "polite" });
   btn.onclick = async () => {
-    btn.textContent = (await copyText(text, pre)) ? "Copied" : "Press Ctrl+C";
+    btn.textContent = (await copyText(text, pre)) ? "Copied" : "Press Ctrl/Cmd+C";
     clearTimeout(timer);
     timer = setTimeout(() => { btn.textContent = "Copy"; }, 1600);
   };
@@ -575,20 +655,209 @@ function crumbs(n) {
   for (let x = n; x && x.kind !== "root"; x = x.parent) parts.unshift(x);
   const reg = (cfg.registry || "Registry").replace(/^https?:\/\//, "");
   return el("nav", { className: "crumbs", "aria-label": "Path" }, el("a", { href: "#/", textContent: reg }),
-    ...parts.map((x, i) => (i === parts.length - 1 ? el("span", { className: x.kind === "node" ? "" : "t", textContent: x.kind === "tag" ? ":" + x.name : x.kind === "plat" ? "@" + x.name : x.name }) : el("a", { href: hashOf(x), className: x.kind === "tag" ? "t" : "", textContent: x.kind === "tag" ? ":" + x.name : x.name }))));
+    ...parts.map((x, i) => crumbNode(x, i === parts.length - 1)));
+}
+function crumbNode(x, last) {
+  if (last) return el("span", { className: x.kind === "node" ? "" : "t", textContent: crumbText(x) });
+  return el("a", { href: hashOf(x), className: x.kind === "tag" ? "t" : "", textContent: crumbText(x) });
+}
+function crumbText(x) {
+  if (x.kind === "tag") return ":" + x.name;
+  return x.kind === "plat" ? "@" + x.name : x.name;
 }
 function lastChange(n) {
   if (n.kind === "node" && n.repo && recent.lastChanged[n.path]) return recent.lastChanged[n.path];
   return Math.max(0, ...[...(n.kids || [])].map(([, k]) => lastChange(k)));
 }
 const link = (n, text) => el("a", { href: hashOf(n), textContent: text || n.name });
-function childTable(n) {
-  const kids = sorted([...n.kids.values()], lastChange);
-  const trs = kids.map((k) => el("tr", {}, el("td", {}, el("span", { className: "ico" }, icon("folder"), link(k, k.name))),
-    el("td", { className: "mut", textContent: k.repo ? "repository" : "folder" }), el("td", { className: "mut", textContent: ago(lastChange(k)) })));
-  return trs.length ? paged(trs, ["Name", "Type", "Last change"]) : [];
-}
 function showMain(...kids) { $("main").replaceChildren(...kids); }
+
+// ---- Sortable, filterable, paged lists: the tags of a repository and the folders and repositories under a folder -----------------
+// Sort state is kept per view in memory only. A header click cycles ascending, descending, then back to the default order.
+const viewState = new Map();
+function stateOf(id) {
+  if (!viewState.has(id)) viewState.set(id, { sort: null, filter: "", shown: 0 });
+  return viewState.get(id);
+}
+function resetShown() {
+  shown = 0;
+  for (const st of viewState.values()) st.shown = 0;
+}
+// Tag order that knows versions: 1.10.0 after 1.9.0, a pre-release before its release, then names that are not versions.
+const SEMVER = /^v?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+function parseTag(tag) {
+  const m = SEMVER.exec(tag);
+  return m ? { nums: m[1].split(".").map(Number), pre: m[2] ? m[2].split(".") : [] } : null;
+}
+function cmpNums(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] || 0) - (b[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+function cmpPreId(x, y) {
+  const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y);
+  if (xn && yn) return Number(x) - Number(y);
+  if (xn) return -1;
+  if (yn) return 1;
+  return x.localeCompare(y);
+}
+function cmpPre(a, b) {
+  if (!a.length || !b.length) return b.length - a.length; // no pre-release sorts after one
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const d = cmpPreId(a[i], b[i]);
+    if (d) return d;
+  }
+  return a.length - b.length;
+}
+function tagCompare(a, b) {
+  const pa = parseTag(a), pb = parseTag(b);
+  if (pa && pb) return cmpNums(pa.nums, pb.nums) || cmpPre(pa.pre, pb.pre) || collator.compare(a, b);
+  if (pa) return -1;
+  if (pb) return 1;
+  return collator.compare(a, b);
+}
+const numCmp = (x, y) => x - y;
+const loadedManifest = (t) => manifests.get(`${t.parent.path}@${t.digest}`);
+const sizeOf = (t) => { const m = loadedManifest(t); return m && !m.index ? layersTotal(m) : null; };
+const platformsOf = (t) => { const m = loadedManifest(t); return m ? detailCells(m)[0] || null : null; };
+// Columns: val(item) is the sort key or null (a row without one goes last in either direction), cmp compares two keys.
+const TAG_COLUMNS = [
+  { key: "tag", label: "Tag", val: (t) => t.tag, cmp: tagCompare },
+  { key: "digest", label: "Digest", tip: "Groups the tags that share a digest", val: (t) => t.digest, cmp: collator.compare },
+  { key: "size", label: "Size", tip: "Sorts loaded rows. A multi-arch index has no size of its own.", val: sizeOf, cmp: numCmp },
+  { key: "platforms", label: "Platforms", tip: "Sorts loaded rows", val: platformsOf, cmp: collator.compare },
+  { key: "changed", label: "Changed", val: (t) => t.changed || null, cmp: numCmp },
+];
+const tagDefault = (a, b) => (prefs.sort === "recent" ? (b.changed || 0) - (a.changed || 0) : 0) || tagCompare(a.tag, b.tag);
+function sortItems(items, col, dir, tie) {
+  const keyed = items.filter((i) => col.val(i) != null);
+  const blank = items.filter((i) => col.val(i) == null);
+  keyed.sort((a, b) => dir * col.cmp(col.val(a), col.val(b)) || tie(a, b));
+  return [...keyed, ...blank.sort(tie)];
+}
+function cycleSort(st, key) {
+  if (st.sort?.key !== key) st.sort = { key, dir: 1 };
+  else if (st.sort.dir === 1) st.sort.dir = -1;
+  else st.sort = null;
+}
+const FILTER_MIN = 1; // the filter and count show for any list with more than one row
+function sortHeader(st, col, redraw) {
+  const active = st.sort?.key === col.key;
+  const dir = st.sort?.dir;
+  const button = el("button", { type: "button", className: "thbtn", title: col.tip || "", onclick: () => { cycleSort(st, col.key); redraw(); } }, col.label, active ? icon("arrow", dir < 0 ? "desc" : "") : null);
+  let aria = "none";
+  if (active) aria = dir < 0 ? "descending" : "ascending";
+  return el("th", { "aria-sort": aria }, button);
+}
+function orderedItems(spec, st, list) {
+  if (!st.sort) return [...list].sort(spec.defaultCmp);
+  return sortItems(list, spec.columns.find((c) => c.key === st.sort.key), st.sort.dir, spec.tie);
+}
+const countText = (shownN, total, all, filtered) => `Showing ${shownN} of ${total}` + (filtered ? ` matching, ${all} in all` : "");
+const noMatches = (cols) => el("tr", {}, el("td", { colSpan: cols, className: "mut", textContent: "No matches." }));
+// spec: {id, items, columns, defaultCmp, tie, match(item, lowerText), row(item) -> tr, placeholder, onDraw(visibleItems),
+// lateKeys (columns whose data arrives after drawing) and onLate(redraw) to be told how to redraw once it has}
+function listView(spec) {
+  const st = stateOf(spec.id);
+  const input = el("input", { type: "search", className: "listfilter", placeholder: spec.placeholder, "aria-label": spec.placeholder, value: st.filter, autocomplete: "off", spellcheck: false });
+  const count = el("p", { className: "mut listcount" });
+  const head = el("tr"), body = el("tbody"), more = el("p");
+  function draw() {
+    const text = st.filter.toLowerCase();
+    const list = text ? spec.items.filter((i) => spec.match(i, text)) : spec.items;
+    const page = st.shown || prefs.pageSize;
+    const visible = orderedItems(spec, st, list).slice(0, page);
+    head.replaceChildren(...spec.columns.map((c) => sortHeader(st, c, draw)));
+    body.replaceChildren(...(visible.length ? visible.map(spec.row) : [noMatches(spec.columns.length)]));
+    count.textContent = countText(visible.length, list.length, spec.items.length, !!text);
+    const left = list.length - visible.length;
+    more.replaceChildren(...(left > 0 ? [el("button", { type: "button", textContent: `Show more (${left} left)`, onclick: () => { st.shown = page + prefs.pageSize; draw(); } })] : []));
+    spec.onDraw?.(visible);
+  }
+  input.oninput = () => { st.filter = input.value.trim(); st.shown = 0; draw(); };
+  spec.onLate?.(() => { if (st.sort && spec.lateKeys.includes(st.sort.key)) draw(); });
+  draw();
+  return [...(spec.items.length > FILTER_MIN ? [input, count] : []), el("table", { className: "sortable" }, el("thead", {}, head), body), more];
+}
+
+// Size and platforms of the rows on screen are filled in as they scroll into view: one manifest request per row, tags=0, at most four at once.
+const LAZY_MAX = 4;
+const lazy = { queue: [], active: 0, io: null, seen: new WeakSet(), redraw: null }; // redraw: re-sort a list sorted by a column the fill just completed
+function lazyReset() {
+  lazy.redraw = null;
+  lazy.io?.disconnect();
+  lazy.queue = [];
+  lazy.seen = new WeakSet();
+  lazy.io = window.IntersectionObserver ? new IntersectionObserver(lazyHit, { root: $("main"), rootMargin: "150px" }) : null;
+}
+function lazyHit(entries) {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    lazy.io.unobserve(e.target);
+    lazy.queue.push(e.target.rowEntry);
+  }
+  lazyPump();
+}
+function lazyPump() {
+  while (lazy.active < LAZY_MAX && lazy.queue.length) {
+    const r = lazy.queue.shift();
+    if (r.done || !tree.byId.has(r.t.id)) continue;
+    lazy.active++;
+    getManifest(r.t.parent.path, r.t.tag, r.t.digest).then(r.apply).catch(() => { /* the row keeps its blanks */ }).finally(() => { lazy.active--; lazyPump(); if (!lazy.active && !lazy.queue.length) lazy.redraw?.(); });
+  }
+}
+function lazyWatch(r) {
+  if (r.done || lazy.seen.has(r)) return;
+  lazy.seen.add(r);
+  if (lazy.io) {
+    r.tr.rowEntry = r;
+    lazy.io.observe(r.tr);
+  } else {
+    lazy.queue.push(r); // no IntersectionObserver: fill the rows that are shown
+    lazyPump();
+  }
+}
+
+function tagRow(t) { // a table row for a tag, whose size and platforms fill in later
+  const plat = el("td", { className: "mut" }), sz = el("td", { className: "mut" });
+  const r = { t, done: false };
+  r.apply = (m) => { [plat.textContent, sz.textContent] = detailCells(m); r.done = true; };
+  const cached = loadedManifest(t);
+  if (cached) r.apply(cached);
+  const ref = `${cfg.registryHost || "<REGISTRY>"}/${t.parent.path}:${t.tag}`;
+  r.tr = el("tr", {}, el("td", {}, el("span", { className: "ico" }, icon("whale", "whale"), link(t, t.tag)), rowCopy(ref, `Copy image reference for ${t.tag}`)),
+    el("td", { className: "nw" }, code(short(t.digest)), rowCopy(t.digest, `Copy digest for ${t.tag}`)), sz, plat, el("td", { className: "mut", textContent: ago(t.changed) }));
+  return r;
+}
+function tagsList(n) {
+  lazyReset();
+  const rowsOf = new Map();
+  const entry = (t) => { if (!rowsOf.has(t)) rowsOf.set(t, tagRow(t)); return rowsOf.get(t); };
+  return listView({
+    id: "tags:" + n.path, items: n.tagList, columns: TAG_COLUMNS, defaultCmp: tagDefault, tie: (a, b) => tagCompare(a.tag, b.tag),
+    match: (t, text) => t.tag.toLowerCase().includes(text), placeholder: "Filter tags",
+    row: (t) => entry(t).tr, onDraw: (vis) => vis.forEach((t) => lazyWatch(entry(t))),
+    lateKeys: ["size", "platforms"], onLate: (redraw) => { lazy.redraw = redraw; },
+  });
+}
+
+function childrenList(n) {
+  const changed = new Map([...n.kids.values()].map((k) => [k, lastChange(k)]));
+  const kindOf = (k) => (k.repo ? "repository" : "folder");
+  const byRecent = (a, b) => changed.get(b) - changed.get(a) || byName(a, b);
+  return listView({
+    id: "kids:" + n.id, items: [...n.kids.values()], tie: byName, defaultCmp: prefs.sort === "recent" ? byRecent : byName,
+    columns: [
+      { key: "name", label: "Name", val: (k) => k.name, cmp: collator.compare },
+      { key: "type", label: "Type", val: kindOf, cmp: collator.compare },
+      { key: "changed", label: "Last change", val: (k) => changed.get(k) || null, cmp: numCmp },
+    ],
+    match: (k, text) => k.name.toLowerCase().includes(text), placeholder: "Filter",
+    row: (k) => el("tr", {}, el("td", {}, el("span", { className: "ico" }, icon("folder"), link(k, k.name))), el("td", { className: "mut", textContent: kindOf(k) }), el("td", { className: "mut", textContent: ago(changed.get(k)) })),
+  });
+}
 
 function recentPane() {
   const rows = recent.events.map((e) => el("tr", {},
@@ -598,13 +867,13 @@ function recentPane() {
     el("td", {}, code(short(e.digest || e.prev)))));
   const note = (recent.persistent ? "History is saved to disk." : "History is in memory only and resets when the UI restarts.")
     + ` Watching since ${new Date(recent.since * 1000).toLocaleString()}. Times are when the UI saw the change, not when it was pushed or built.`;
+  const empty = recent.baselined ? "No changes seen yet." : "Reading the registry for the first time.";
   showMain(el("h2", { textContent: "Recent changes" }), el("p", { className: "mut", textContent: note }),
-    ...(rows.length ? paged(rows, ["When", "Change", "Image", "Digest"]) : [el("p", { className: "mut", textContent: recent.baselined ? "No changes seen yet." : "Reading the registry for the first time." })]));
+    ...(rows.length ? paged(rows, ["When", "Change", "Image", "Digest"]) : [el("p", { className: "mut", textContent: empty })]));
 }
 function rootPane(n) {
-  const kids = childTable(n);
   showMain(crumbs(n), el("h2", { textContent: "Repositories" }), el("p", { className: "mut", textContent: `${tree.names.length} repositories, ${recent.tags} tags known to the poller.` }),
-    ...(kids.length ? kids : [el("p", { className: "mut", textContent: "The catalog is empty." })]));
+    ...(n.kids.size ? childrenList(n) : [el("p", { className: "mut", textContent: "The catalog is empty." })]));
 }
 // size and platforms of a tag, from its manifest. Fetched on demand, because the manifest call lists every tag in the repo.
 const layersTotal = (m) => m.layers.reduce((a, l) => a + (l.size || 0), 0);
@@ -616,107 +885,102 @@ function detailCells(m) {
   return [m.platform ? `${m.platform.os}/${m.platform.architecture}` : "", size(layersTotal(m))];
 }
 function repoPane(n) {
-  const trs = sorted(n.tagList, (t) => t.changed).map((t) => {
-    const plat = el("td", { className: "mut" }), sz = el("td", { className: "mut" });
-    const cached = manifests.get(`${n.path}@${t.digest}`);
-    const fill = (m) => { [plat.textContent, sz.textContent] = detailCells(m); };
-    if (cached) fill(cached);
-    const tr = el("tr", {}, el("td", {}, el("span", { className: "ico" }, icon("whale", "whale"), link(t, t.tag))), el("td", { className: "nw" }, code(short(t.digest))), sz, plat, el("td", { className: "mut", textContent: ago(t.changed) }));
-    return { tr, t, fill, done: !!cached };
-  });
-  const view = trs.slice(0, shown || prefs.pageSize);
-  const todo = view.filter((r) => !r.done);
-  const load = async (btn) => {
-    if (btn) btn.disabled = true;
-    const q = [...todo];
-    await Promise.all([0, 1, 2].map(async () => { for (let r = q.shift(); r; r = q.shift()) { if (tree.byId.get(r.t.id) !== r.t) continue; try { r.fill(await getManifest(n.path, r.t.tag, r.t.digest)); } catch (e) { /* the row keeps its blanks */ } } }));
-    if (btn) btn.hidden = true;
-  };
-  const btn = el("button", { textContent: "Load size and platforms", onclick: () => void load(btn), title: "One manifest request per row" });
-  const kids = n.kids.size ? [el("h3", { textContent: "Folders" }), ...childTable(n)] : [];
+  const tags = n.tagList.length ? tagsList(n) : [el("p", { className: "mut", textContent: n.fresh && !n.loading ? "No tags." : "Loading..." })];
+  const kids = n.kids.size ? [el("h3", { textContent: "Folders" }), ...childrenList(n)] : [];
   showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("folderOpen")), n.path), el("p", { className: "reporef" }, copyValue(`${cfg.registryHost || "<REGISTRY>"}/${n.path}`, "Copy repository reference")),
-    ...(n.err ? [el("p", { className: "mut", textContent: n.err })] : []),
-    ...(trs.length ? [...paged(trs.map((r) => r.tr), ["Tag", "Digest", "Size", "Platforms", "Changed"]), ...(todo.length > 20 ? [el("p", {}, btn)] : [])] : [el("p", { className: "mut", textContent: n.fresh && !n.loading ? "No tags." : "Loading..." })]), ...kids, commandsEl(n.path, "", ""));
-  if (todo.length && todo.length <= 20) void load(null);
+    ...(n.err ? [el("p", { className: "mut", textContent: n.err })] : []), ...tags, ...kids, commandsEl(n.path, "", ""));
 }
 function folderPane(n) {
-  const kids = childTable(n);
-  showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("folderOpen")), n.path), ...kids);
+  showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("folderOpen")), n.path), ...(n.kids.size ? childrenList(n) : []));
 }
 
 function actions(repo, ref, digest) {
   // The tagged indexes this digest is a child of. The server refuses the delete or move anyway, this says so before the click.
-  const blocked = async () => {
+  const parentInfo = async () => {
     try {
-      const r = await api(`/api/parents?repo=${encodeURIComponent(repo)}&digest=${encodeURIComponent(digest)}`);
-      if (!r.parents.length) return "";
-      const plats = [...new Set(r.parents.map((p) => p.platform).filter(Boolean))].sort();
-      const tags = r.parents.map((p) => p.tag).join(", ") + (r.more ? ` and ${r.more} more` : "");
-      return `This manifest is ${plats.length ? plats.join(", ") : "a child"} inside ${tags}. Delete or retag those first.`;
-    } catch (e) { return ""; }
+      return await api(`/api/parents?repo=${encodeURIComponent(repo)}&digest=${encodeURIComponent(digest)}`);
+    } catch (e) {
+      return null; // no warning then: the server refuses a bad delete or move itself
+    }
+  };
+  const blockText = (r) => {
+    if (!r || !r.parents.length) return "";
+    const plats = [...new Set(r.parents.map((p) => p.platform).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const tags = r.parents.map((p) => p.tag).join(", ") + (r.more ? ` and ${r.more} more` : "");
+    return `This manifest is ${plats.length ? plats.join(", ") : "a child"} inside ${tags}. Delete or retag those first.`;
   };
   const copy = (move) => async () => {
-    let sharing = [];
-    if (move) { try { sharing = (await getManifest(repo, ref, digest, true)).tags; } catch (e) { banner(e.message, true); return; } }
-    const block = move ? await blocked() : "";
-    const shared = sharing.length > 1 ? ` Every tag on it goes: ${sharing.join(", ")}.` : "";
-    const note = move ? "The source digest is deleted after the copy is verified." + shared : "Blobs are mounted, so no data is uploaded.";
-    const v = await ask(move ? "Move to..." : "Copy to...", [`From ${repo}:${ref}`, note],
-      [{ name: "dst", label: "Destination repository", value: repo }, { name: "dstRef", label: "Destination tag", value: ref }], move, block);
+    let m;
+    try { m = await getManifest(repo, ref, digest, move); } catch (e) { banner(e.message, true); return; } // a move needs the authoritative tag list
+    const v = await transfer({ move, repo, ref, digest, m, sharing: move ? m.tags : [], block: move ? blockText(await parentInfo()) : "" });
     if (v) await run(() => api(move ? "/api/move" : "/api/copy", { src: repo, srcRef: ref, dst: v.dst, dstRef: v.dstRef }), async () => { await touch(repo, v.dst); location.hash = `#/repo/${v.dst}:${v.dstRef}`; });
   };
   const del = async () => {
-    let sharing = [];
-    try { sharing = (await getManifest(repo, ref, digest, true)).tags; } catch (e) { banner(e.message, true); return; }
-    const also = sharing.length ? ` Tags removed with it: ${sharing.join(", ")}.` : "";
-    const block = await blocked();
-    const v = await ask("Delete manifest", [`Deletes ${digest} from ${repo}. The registry deletes by digest, so every tag pointing at it goes.${also}`, "Disk space is freed by garbage collection, not by this action."],
-      [{ name: "children", type: "checkbox", label: "Also delete index children that no other tag uses" }], true, block);
+    let m;
+    try { m = await getManifest(repo, ref, digest, true); } catch (e) { banner(e.message, true); return; }
+    const info = await parentInfo();
+    const v = await confirmDelete({ repo, ref, digest, m, info, block: blockText(info) });
     if (v) await run(() => api("/api/delete", { repo, digest, children: v.children }), async () => { await touch(repo); location.hash = "#/repo/" + repo; });
   };
   const b = (text, fn, cls) => el("button", { textContent: text, className: cls || "", onclick: fn });
   return el("div", { className: "bar" }, ...(cfg.readonly ? [] : [b("Copy to...", copy(false)), b("Move to...", copy(true)), b("Delete", del, "danger")]));
 }
 
+const tableRow = (k, v) => el("tr", {}, el("th", { textContent: k }), el("td", {}, v));
+const subTable = (title, head, items) => (items.length ? [el("h3", { textContent: title }), el("table", {}, el("tr", {}, ...head.map((h) => el("th", { textContent: h }))), ...items)] : []);
+function manifestProps(n, m, path, sharing) {
+  const host = cfg.registryHost || "<REGISTRY>";
+  const props = [];
+  if (n.kind === "tag") props.push(tableRow("Image", copyValue(`${host}/${path}:${n.tag}`, "Copy image reference")));
+  props.push(tableRow("Pinned", copyValue(`${host}/${path}@${m.digest}`, "Copy pinned image reference")), tableRow("Digest", copyValue(m.digest, "Copy digest")),
+    tableRow("Media type", code(m.mediaType)), tableRow("Manifest size", size(m.size)));
+  if (m.layers.length) props.push(tableRow("Layers size", size(layersTotal(m))));
+  props.push(tableRow("Tags", sharing.join(", ") || "none"));
+  if (n.kind === "tag" && n.changed) props.push(tableRow("Changed", el("span", { title: new Date(n.changed * 1000).toLocaleString(), textContent: ago(n.changed) })));
+  if (m.platform) props.push(tableRow("Platform", `${m.platform.os}/${m.platform.architecture}`));
+  if (m.config) props.push(tableRow("Config", code(m.config)));
+  return props;
+}
+function platformSections(n, m) {
+  const real = m.platforms.filter((p) => !isAtt(p)), atts = m.platforms.length - real.length;
+  const node = (p) => (n.kind === "tag" && n.plats ? n.plats.find((x) => x.digest === p.digest) : null);
+  const row = (p) => el("tr", {}, el("td", {}, node(p) ? link(node(p), platName(p)) : platName(p)), el("td", {}, code(short(p.digest))), el("td", { textContent: size(p.size) }));
+  const note = `+${atts} attestation${atts > 1 ? "s" : ""}, hidden from the list. Copy and delete handle them with the image.`;
+  return [...subTable("Platforms", ["Platform", "Digest", "Size"], real.map(row)), ...(atts ? [el("p", { className: "mut", textContent: note })] : [])];
+}
+function manifestHeading(n, t, path) {
+  const isTag = n.kind === "tag";
+  return el("h2", {}, el("span", { className: "ico" }, icon(isTag ? "whale" : "chip", isTag ? "whale" : "")), isTag ? `${path}:${n.tag}` : `${path}:${t.tag} ${n.name}`);
+}
 async function manifestPane(n, seq) {
   const t = n.kind === "tag" ? n : n.parent, path = t.parent.path;
   const ref = n.kind === "tag" ? n.tag : n.digest;
   const m = await getManifest(path, ref, n.digest);
   if (n.kind === "tag") await ensurePlats(n);
   if (seq !== paneSeq) return;
-  const row = (k, v) => el("tr", {}, el("th", { textContent: k }), el("td", {}, v));
-  const host = cfg.registryHost || "<REGISTRY>";
-  const props = [];
-  if (n.kind === "tag") props.push(row("Image", copyValue(`${host}/${path}:${n.tag}`, "Copy image reference")));
-  props.push(row("Pinned", copyValue(`${host}/${path}@${m.digest}`, "Copy pinned image reference")), row("Digest", copyValue(m.digest, "Copy digest")),
-    row("Media type", code(m.mediaType)), row("Manifest size", size(m.size)));
-  if (m.layers.length) props.push(row("Layers size", size(layersTotal(m))));
   const sharing = t.parent.tagList.filter((x) => x.digest === m.digest).map((x) => x.tag); // from the tag list the pane already holds
-  props.push(row("Tags", sharing.join(", ") || "none"));
-  if (n.kind === "tag" && n.changed) props.push(row("Changed", el("span", { title: new Date(n.changed * 1000).toLocaleString(), textContent: ago(n.changed) })));
-  if (m.platform) props.push(row("Platform", `${m.platform.os}/${m.platform.architecture}`));
-  if (m.config) props.push(row("Config", code(m.config)));
-  const sub = (title, head, items) => items.length ? [el("h3", { textContent: title }), el("table", {}, el("tr", {}, ...head.map((h) => el("th", { textContent: h }))), ...items)] : [];
-  const real = m.platforms.filter((p) => !isAtt(p)), atts = m.platforms.length - real.length;
-  const plat = (p) => (n.kind === "tag" && n.plats ? n.plats.find((x) => x.digest === p.digest) : null);
-  showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon(n.kind === "tag" ? "whale" : "chip", n.kind === "tag" ? "whale" : "")), n.kind === "tag" ? `${path}:${n.tag}` : `${path}:${t.tag} ${n.name}`),
-    actions(path, ref, m.digest), el("table", { className: "props" }, ...props),
-    ...(n.kind === "tag" ? [commandsEl(path, n.tag, m.digest)] : []),
-    ...sub("Platforms", ["Platform", "Digest", "Size"], real.map((p) => el("tr", {},
-      el("td", {}, plat(p) ? link(plat(p), platName(p)) : platName(p)), el("td", {}, code(short(p.digest))), el("td", { textContent: size(p.size) })))),
-    ...(atts ? [el("p", { className: "mut", textContent: `+${atts} attestation${atts > 1 ? "s" : ""}, hidden from the list. Copy and delete handle them with the image.` })] : []),
-    ...sub("Layers", ["Digest", "Size"], m.layers.map((l) => el("tr", {}, el("td", {}, code(l.digest)), el("td", { textContent: size(l.size) })))));
+  showMain(crumbs(n), manifestHeading(n, t, path), actions(path, ref, m.digest), el("table", { className: "props" }, ...manifestProps(n, m, path, sharing)),
+    ...(n.kind === "tag" ? [commandsEl(path, n.tag, m.digest)] : []), ...platformSections(n, m),
+    ...subTable("Layers", ["Digest", "Size"], m.layers.map((l) => el("tr", {}, el("td", {}, code(l.digest)), el("td", { textContent: size(l.size) })))));
 }
 
-async function renderPane() {
-  if ($("dlg").open) { paneStale = true; return; }
+function notFoundPane() {
+  showMain(el("h2", { textContent: "Not found" }), el("p", { className: "mut" }, "That repository or tag is not in the registry. ", el("a", { href: "#/", textContent: "Back to the registry" })));
+}
+async function drawPane(n, seq) {
+  if (!n) return notFoundPane();
+  if (n === RECENT) return recentPane();
+  if (n.kind === "root") return rootPane(n);
+  if (n.kind !== "node") return manifestPane(n, seq);
+  if (!n.repo) return folderPane(n);
+  await ensureTags(n);
+  if (seq === paneSeq) repoPane(n);
+}
+async function renderPane(force) { // force: a setting changed under an open panel and the page behind it should show the effect
+  if (!force && modalOpen()) { paneStale = true; return; }
   const seq = ++paneSeq, n = tree.sel === "recent" ? RECENT : tree.byId.get(tree.sel);
   try {
-    if (!n) showMain(el("h2", { textContent: "Not found" }), el("p", { className: "mut" }, "That repository or tag is not in the registry. ", el("a", { href: "#/", textContent: "Back to the registry" })));
-    else if (n === RECENT) recentPane();
-    else if (n.kind === "root") rootPane(n);
-    else if (n.kind === "node") { if (n.repo) { await ensureTags(n); if (seq === paneSeq) repoPane(n); } else folderPane(n); }
-    else await manifestPane(n, seq);
+    await drawPane(n, seq);
     updated = new Date();
     liveLabel();
   } catch (e) { if (seq === paneSeq) banner(e.message, true); }
@@ -744,10 +1008,13 @@ async function resolve(r) {
   if (!n || !r.tag) return n;
   await ensureTags(n);
   let t = n.tagMap.get(r.tag);
-  if (!t && !(n.missing && n.missing.get(r.tag) > Date.now() - 30000)) { // a link to a tag that is not there is checked once, then remembered for 30 s
+  if (!t && !(n.missing?.get(r.tag) > Date.now() - 30000)) { // a link to a tag that is not there is checked once, then remembered for 30 s
     await ensureTags(n, true);
     t = n.tagMap.get(r.tag);
-    if (!t) (n.missing = n.missing || new Map()).set(r.tag, Date.now());
+    if (!t) {
+      if (!n.missing) n.missing = new Map();
+      n.missing.set(r.tag, Date.now());
+    }
   }
   if (!t || !r.digest) return t;
   await ensurePlats(t);
@@ -765,7 +1032,7 @@ async function navigate() {
   if (n) prefs.selected = hashOf(n).slice(1);
   savePrefs();
   select(n ? n.id : null, true);
-  shown = 0;
+  resetShown();
   drawer(false);
   void renderPane();
 }
@@ -788,6 +1055,25 @@ function sync() {
   syncing = doSync().catch((e) => banner(e.message, true)).finally(() => { syncing = null; if (again) { again = false; void sync(); } });
   return syncing;
 }
+function pathFromId(id) { // the repository path in a node id such as t:lab/app:1.0 or p:lab/app:1.0@sha256:...
+  const rest = id.slice(2), cut = rest.search(/[:@]/);
+  return cut < 0 ? rest : rest.slice(0, cut);
+}
+function refreshTouched(touched, gap) { // reload the tags of every changed repository that is loaded, and flash the ones that are not
+  const jobs = [];
+  for (const n of tree.byPath.values()) {
+    if (!n.repo || !(gap || touched.has(n.path))) continue;
+    dropManifests(n.path);
+    if (n.tagList.length || n.loading) jobs.push(ensureTags(Object.assign(n, { fresh: false }), true)); // reconciling flashes what changed
+    else flash(n);
+  }
+  return Promise.all(jobs);
+}
+function leaveGoneNode() { // the selected node is gone: fall back to what holds it
+  if (!tree.sel || tree.sel === "recent" || tree.byId.has(tree.sel)) return;
+  const n = tree.byPath.get(pathFromId(tree.sel));
+  location.hash = n ? hashOf(n) : "#/";
+}
 async function doSync() {
   const [rc, names] = await Promise.all([api("/api/recent"), api("/api/repos")]);
   const first = lastSeq === null;
@@ -798,20 +1084,11 @@ async function doSync() {
   const grew = applyCatalog(names, !first);
   const touched = new Set(evs.map((e) => repoOf(e.ref)));
   if (evs.length || gap) { tree.indexStale = true; tree.matches = null; }
-  const jobs = [];
-  for (const n of tree.byPath.values()) {
-    if (!n.repo || !(gap || touched.has(n.path))) continue;
-    dropManifests(n.path);
-    if (n.tagList.length || n.loading) jobs.push(ensureTags(Object.assign(n, { fresh: false }), true)); // reconciling flashes what changed
-    else flash(n);
-  }
-  await Promise.all(jobs);
-  if (tree.sel && tree.sel !== "recent" && !tree.byId.has(tree.sel)) { // the selected node is gone: fall back to what holds it
-    const n = tree.byPath.get(tree.sel.replace(/^[ntp]:/, "").replace(/[:@].*$/, ""));
-    location.hash = n ? hashOf(n) : "#/";
-  }
+  await refreshTouched(touched, gap);
+  leaveGoneNode();
   banner(notice());
   renderTree();
+  if (pickerSync) pickerSync();
   if (!first && (grew || evs.length || gap)) void renderPane();
   updated = new Date();
   liveLabel();
@@ -839,12 +1116,316 @@ let pollTimer = 0;
 function startPoll() { // the fallback while the stream is down, every `interval` seconds. Restarted when the interval changes.
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
-    if (!prefs.live || document.hidden || $("dlg").open) return;
+    if (!prefs.live || document.hidden || modalOpen()) return;
     if (state === "live") return;
     try { const r = await api("/api/recent?limit=1"); if (r.seq !== lastSeq) void sync(); } catch (e) { /* shown by the next sync() */ }
   }, 1000 * Math.max(5, prefs.interval));
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden && stale) { stale = false; void sync(); } });
+
+// ---- Copy to / Move to: source card, destination path with a folder picker, promote chips, tag and a preview -----------------
+// The same name rules as the server (registry.py), so a bad name is caught while typing. The server stays the authority.
+const REPO_PART = /^[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*$/;
+const TAG_NAME = /^\w[\w.-]{0,127}$/;
+const DIGEST_REF = /^(?:sha256:[a-f0-9]{64}|sha512:[a-f0-9]{128})$/;
+function repoError(path) {
+  if (!path) return "Enter a destination repository.";
+  if (path.length > 255 || !path.split("/").every((p) => REPO_PART.test(p))) return "Use lowercase letters, digits and . _ - in each part, parts separated by /.";
+  return "";
+}
+const tagError = (t) => (TAG_NAME.test(t) || DIGEST_REF.test(t) ? "" : "A tag starts with a letter, digit or _ and holds letters, digits, . _ and - (up to 128).");
+let pickerSync = null; // set while the dialog is open, so live changes to the catalog reach its picker
+
+// The card at the top of the transfer and delete dialogs: what is being acted on.
+function sourceCard(o, copyDigest) {
+  const [platforms, sizeText] = o.m ? detailCells(o.m) : ["", ""];
+  const digest = copyDigest ? copyValue(o.digest, "Copy digest", short(o.digest) + "...") : el("span", { textContent: short(o.digest) + "..." });
+  return el("div", { className: "srccard" },
+    el("div", { className: "srcname" }, el("span", { className: "ico" }, icon("whale", "whale")), el("code", { textContent: `${o.repo}:${o.ref}` })),
+    el("div", { className: "srcmeta mut" }, digest, ...(platforms ? [el("span", { textContent: platforms })] : []), ...(sizeText ? [el("span", { textContent: sizeText })] : [])));
+}
+
+// Delete: says what goes and what does not. o: {repo, ref, digest, m (a fresh manifest, with its tags), block, info (the /api/parents answer)}.
+// Resolves to {children} or null.
+function confirmDelete(o) {
+  return new Promise((resolve) => {
+    let result = null, children = false;
+    const m = o.m, isIndex = !!m.index, removable = o.info ? o.info.removable : 0;
+    const others = tree.names.filter((p) => p !== o.repo);
+    const example = others.find((p) => p.split("/")[0] !== o.repo.split("/")[0]) || others[0];
+    const sw = el("button", { type: "button", role: "switch", className: "switch", "aria-labelledby": "d-sw", "aria-checked": "false", disabled: !removable,
+      onclick: () => { children = !children; sw.setAttribute("aria-checked", String(children)); } });
+    const go = el("button", { type: "button", className: "primary dangerfill", textContent: "Delete", disabled: !!o.block });
+    go.onclick = () => { if (go.disabled) return; result = { children }; dlg.close(); };
+    const dlg = el("dialog", { className: "settings transfer", "aria-labelledby": "d-title" },
+      el("div", { className: "shead" }, el("h2", { id: "d-title", textContent: "Delete manifest" }),
+        el("button", { type: "button", className: "iconbtn", "aria-label": "Close", onclick: () => dlg.close() }, icon("close"))),
+      el("div", { className: "sbody" },
+        sourceCard(o, true),
+        ...(o.block ? [el("p", { className: "dlg-warn", role: "alert", textContent: o.block })] : []),
+        el("p", { className: "scope", textContent: `Deletes this manifest from ${o.repo} only. Other repositories${example ? `, such as ${example}` : ""}, are not affected, even if they hold the same image.` }),
+        el("div", { className: "xlabel", textContent: "Tags removed with it" }),
+        el("div", { className: "tagchips" }, ...(m.tags.length ? m.tags.map((t) => el("span", { className: "tagchip", textContent: t })) : [el("span", { className: "mut", textContent: "none, this digest has no tag" })])),
+        ...(isIndex ? [el("div", { className: "srow" }, el("div", {}, el("div", { className: "slabel", id: "d-sw", textContent: "Also delete platform images" }),
+          el("div", { className: "sdesc", textContent: removable ? `Index children that no other tag in this repository uses. ${removable} of ${o.info.children} would be removed.` : "Every child is used by another tag in this repository, so none would be removed." })), el("div", { className: "sctl" }, sw))] : []),
+        el("p", { className: "mut", textContent: "Disk space is freed by garbage collection, not by this action." })),
+      el("div", { className: "sfoot" }, el("button", { type: "button", textContent: "Cancel", onclick: () => dlg.close() }), go));
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
+    document.body.append(dlg);
+    dlg.showModal();
+    (o.block ? dlg.querySelector(".sfoot button") : go).focus(); // never land on Delete by default when it is blocked
+  });
+}
+
+// The destination folder picker: folders and repositories from the main tree's data, no tags. Click selects, the chevron opens.
+function createPicker(st, onChoose) {
+  const open = new Set(); // ids of open folders
+  let focusId = null;
+  const box = el("div", { className: "picker", role: "tree", "aria-label": "Folders and repositories" });
+  const flat = () => {
+    const out = [];
+    const walk = (n, depth, anc, last) => {
+      out.push({ n, depth, anc, last });
+      if (!open.has(n.id)) return;
+      const k = folderKids(n);
+      const below = depth === 0 ? [] : [...anc, !last];
+      k.forEach((c, i) => walk(c, depth + 1, below, i === k.length - 1));
+    };
+    const top = folderKids(tree.root);
+    top.forEach((n, i) => walk(n, 0, [], i === top.length - 1));
+    return out;
+  };
+  const rowFor = (r) => {
+    const n = r.n, isOpen = open.has(n.id);
+    const row = el("div", {
+      className: "row", role: "treeitem", id: "px-" + n.id, tabIndex: n.id === focusId ? 0 : -1,
+      "aria-level": r.depth + 1, "aria-selected": String(n.path === st.path),
+    }, ...guidesFor(r), el("span", { className: "chev" }, n.kids.size ? icon("chev") : null), icon(isOpen ? "folderOpen" : "folder"), el("span", { className: "lbl", textContent: n.name }));
+    row.dataset.id = n.id;
+    if (n.kids.size) row.setAttribute("aria-expanded", String(isOpen));
+    return row;
+  };
+  const draw = () => {
+    const hadFocus = box.contains(document.activeElement);
+    const rows = flat(), ids = rows.map((r) => r.n.id);
+    const sel = tree.byPath.get(st.path);
+    if (!ids.includes(focusId)) focusId = ids.includes(sel?.id) ? sel.id : ids[0];
+    box.replaceChildren(...rows.map(rowFor));
+    if (hadFocus) $("px-" + focusId)?.focus();
+  };
+  const reveal = (path) => { // open every existing folder above the longest existing prefix of path
+    for (let q = path; q; q = q.includes("/") ? q.slice(0, q.lastIndexOf("/")) : "") {
+      const n = tree.byPath.get(q);
+      if (!n) continue;
+      for (let x = n.parent; x && x !== tree.root; x = x.parent) open.add(x.id);
+      return;
+    }
+  };
+  const show = (node) => { // highlight node (if any), open the way to the path and scroll to it
+    reveal(st.path);
+    if (node) focusId = node.id;
+    draw();
+    $("px-" + node?.id)?.scrollIntoView({ block: "nearest" });
+  };
+  const nodeOf = (target) => { const r = target.closest(".row[data-id]"); return r && tree.byId.get(r.dataset.id); };
+  const setOpen = (n, value) => {
+    if (value) open.add(n.id); else open.delete(n.id);
+    focusId = n.id;
+    draw();
+  };
+  const ops = { expandable: (n) => n.kids.size > 0, isOpen: (n) => open.has(n.id), setOpen };
+  box.addEventListener("click", (e) => {
+    const n = nodeOf(e.target);
+    if (!n) return;
+    if (e.target.closest(".chev")) setOpen(n, !open.has(n.id)); // a click on the row only selects, the chevron opens
+    else onChoose(n);
+  });
+  box.addEventListener("keydown", (e) => {
+    const n = nodeOf(e.target);
+    if (!n) return;
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChoose(n); return; }
+    const list = flat(), to = arrowTarget(e.key, list, list.findIndex((r) => r.n === n), ops);
+    if (to === undefined) return;
+    e.preventDefault();
+    if (to && to !== tree.root) { focusId = to.id; draw(); $("px-" + to.id)?.focus(); }
+  });
+  return { box, show };
+}
+
+// The promote shortcuts. UI_ENVIRONMENTS is an ordered list of lifecycle stages, each a path prefix (prod, or team-a/prod). A chip
+// replaces the stage prefix of the source with its own. A stage with no repositories yet is still offered, marked new.
+const stageList = () => cfg.environments || [];
+function stageOf(path) { // the longest stage that path is, or sits under
+  const hits = stageList().filter((s) => path === s || path.startsWith(s + "/"));
+  return hits.sort((a, b) => b.length - a.length)[0] || null;
+}
+const stageHasRepos = (s) => tree.names.some((p) => p === s || p.startsWith(s + "/"));
+function stageChip(stage, o, from, next, st, focusStage) {
+  const empty = !stageHasRepos(stage);
+  return el("button", {
+    type: "button", className: "chip" + (empty ? " empty" : ""), disabled: stage === from, tabIndex: stage === focusStage ? 0 : -1,
+    "aria-pressed": String(stage === stageOf(st.path)), "aria-label": stage + (empty ? ", no repositories yet" : "") + (stage === next ? ", next stage" : ""), // for screen readers, nothing extra on screen
+  }, stage);
+}
+function createChips(st, o, onPick) {
+  const box = el("div", { className: "chips", role: "group", "aria-label": "Promote to" });
+  const wrap = el("div", { className: "xchips" }, el("span", { className: "xlabel", textContent: "Promote to" }), box);
+  const from = stageOf(o.repo), stages = stageList();
+  wrap.hidden = !from;
+  const draw = () => {
+    if (!from) return;
+    const next = stages[stages.indexOf(from) + 1];
+    const focusStage = next ?? stages.find((s) => s !== from); // the next stage is where Tab lands
+    box.replaceChildren(...stages.map((s) => stageChip(s, o, from, next, st, focusStage)));
+  };
+  box.addEventListener("click", (e) => {
+    const stage = e.target.closest(".chip")?.firstChild?.textContent;
+    if (stage && stage !== from) onPick(stage + o.repo.slice(from.length));
+  });
+  box.addEventListener("keydown", (e) => {
+    const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    const chips = [...box.querySelectorAll(".chip:not(:disabled)")], i = chips.indexOf(document.activeElement);
+    if (!d || i < 0) return;
+    e.preventDefault();
+    chips.forEach((c) => { c.tabIndex = -1; });
+    const to = chips[(i + d + chips.length) % chips.length];
+    to.tabIndex = 0;
+    to.focus();
+  });
+  return { wrap, draw };
+}
+
+const destError = (o, path) => repoError(path) || (o.move && path === o.repo ? "Move needs a different repository than the source." : "");
+// What the destination tag says: an error, or a warning when the tag is already there, and whether that blocks the action.
+function tagNote(o, st, node, dstErr, tErr) {
+  if (tErr) return { cls: "xerr", text: tErr, block: true };
+  if (dstErr) return null;
+  if (!o.move && st.path === o.repo && st.tag === o.ref) return { cls: "xerr", text: "The destination is the source.", block: true };
+  const there = node?.repo ? node.tagMap.get(st.tag) : null;
+  if (!there) return null;
+  const name = `${st.path}:${st.tag}`;
+  if (there.digest !== o.digest) return { cls: "xwarn", text: `${name} exists (${short(there.digest)}...). ${o.move ? "Moving" : "Copying"} replaces it.` };
+  if (o.move) return { cls: "xwarn", text: `${name} already holds this digest. Only the source is removed.` };
+  return { cls: "xwarn", text: `${name} is already identical, nothing to copy.`, block: true };
+}
+function pathBadge(dstErr, exists) {
+  if (dstErr) return el("span", { className: "xerr", textContent: dstErr });
+  return el("span", { className: "tagbadge" + (exists ? "" : " new"), textContent: exists ? "existing repository" : "new repository" });
+}
+function transferLead(o) {
+  if (!o.move) return "Blobs are mounted, so no data is uploaded.";
+  const goes = o.sharing.length ? ` Tags that go with it: ${o.sharing.join(", ")}.` : "";
+  return "The source digest is deleted after the copy is verified." + goes;
+}
+function previewEls(err, ref) {
+  return [el("span", { className: "mut", textContent: "Result" }), err ? el("span", { className: "mut", textContent: "Fix the errors above." }) : copyValue(ref, "Copy resulting reference")];
+}
+
+// o: {move, repo, ref, digest, m (manifest), sharing (tags that go with the digest), block (why a move is refused, or "")}.
+// Resolves to {dst, dstRef} or null.
+function transfer(o) {
+  return new Promise((resolve) => {
+    const verb = o.move ? "Move" : "Copy";
+    const st = { path: o.repo, tag: o.ref };
+    let result = null;
+    const pathIn = el("input", { type: "text", className: "xin", id: "x-path", value: st.path, autocomplete: "off", spellcheck: false, "aria-describedby": "x-pathstat" });
+    const tagIn = el("input", { type: "text", className: "xin", id: "x-tag", value: st.tag, autocomplete: "off", spellcheck: false, "aria-describedby": "x-tagstat" });
+    const pathStat = el("div", { className: "xstat", id: "x-pathstat", "aria-live": "polite" });
+    const tagStat = el("div", { className: "xstat", id: "x-tagstat", "aria-live": "polite" });
+    const preview = el("div", { className: "preview" });
+    const go = el("button", { type: "button", className: "primary", textContent: verb });
+    const setPath = (path) => { st.path = path; pathIn.value = path; update(); };
+    const picker = createPicker(st, (n) => setPath(n.path));
+    const chips = createChips(st, o, setPath);
+    function update() {
+      const dstErr = destError(o, st.path), tErr = tagError(st.tag);
+      const node = tree.byPath.get(st.path), exists = !dstErr && !!node?.repo;
+      const note = tagNote(o, st, node, dstErr, tErr);
+      pathStat.replaceChildren(pathBadge(dstErr, exists));
+      tagStat.replaceChildren(...(note ? [el("span", { className: note.cls, textContent: note.text })] : []));
+      go.disabled = !!(o.block || dstErr || note?.block);
+      preview.replaceChildren(...previewEls(dstErr || tErr, `${cfg.registryHost || "<REGISTRY>"}/${st.path}:${st.tag}`));
+      if (exists && !node.fresh) void ensureTags(node).then(update); // the tags of an existing destination, to tell whether the tag is taken
+      chips.draw();
+      picker.show(dstErr ? null : node);
+    }
+    pickerSync = update;
+    pathIn.oninput = () => { st.path = pathIn.value.trim(); update(); };
+    tagIn.oninput = () => { st.tag = tagIn.value.trim(); update(); };
+    const confirm = () => { if (go.disabled) return; result = { dst: st.path, dstRef: st.tag }; dlg.close(); };
+    go.onclick = confirm;
+    for (const i of [pathIn, tagIn]) i.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); confirm(); } });
+    const lead = transferLead(o);
+    const dlg = el("dialog", { className: "settings transfer", "aria-labelledby": "x-title" },
+      el("div", { className: "shead" }, el("h2", { id: "x-title", textContent: verb + " to..." }),
+        el("button", { type: "button", className: "iconbtn", "aria-label": "Close", onclick: () => dlg.close() }, icon("close"))),
+      el("div", { className: "sbody" },
+        sourceCard(o, false),
+        ...(o.block ? [el("p", { className: "dlg-warn", role: "alert", textContent: o.block })] : []),
+        el("p", { className: "mut", textContent: lead }),
+        el("label", { className: "xlabel", htmlFor: "x-path", textContent: "Destination repository" }), pathIn, pathStat, picker.box, chips.wrap,
+        el("label", { className: "xlabel", htmlFor: "x-tag", textContent: "Destination tag" }), tagIn, tagStat,
+        preview),
+      el("div", { className: "sfoot" }, el("button", { type: "button", textContent: "Cancel", onclick: () => dlg.close() }), go));
+    dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+    dlg.addEventListener("close", () => { pickerSync = null; dlg.remove(); resolve(result); });
+    document.body.append(dlg);
+    update();
+    dlg.showModal();
+    pathIn.focus();
+    pathIn.select();
+  });
+}
+
+// ---- Help: how to free disk space with garbage collection, and the keys. Room for more sections later. -------------------------------
+// The same registry:2 digest as compose.yml. The command is shown for the host to run, never run from here, and never with --delete-untagged
+// (in registry:2.8 it deletes the child manifests of multi-arch images).
+const REGISTRY_IMAGE = "registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373";
+function gcCommand(tool, storage, dry) {
+  return `${tool} run --rm -v ${storage}:/var/lib/registry:Z ${REGISTRY_IMAGE} registry garbage-collect${dry ? " --dry-run" : ""} /etc/docker/registry/config.yml`;
+}
+function gcSection() {
+  const box = el("div", { className: "gcsteps" });
+  const draw = () => {
+    const storage = cfg.registryStorage || "<registry-storage>";
+    const tool = prefs.runtime;
+    const seg = el("div", { className: "seg", role: "group", "aria-label": "Command line tool" }, ...CHOICES.runtime.map((rt) => el("button", {
+      type: "button", textContent: rt, "aria-pressed": String(rt === tool), onclick: () => { applyPrefs({ runtime: rt }); draw(); },
+    })));
+    box.replaceChildren(
+      el("p", { textContent: "Garbage collection frees disk space from deleted images. It needs the registry stopped, so it runs on the host, not from this page." }),
+      seg,
+      el("ol", { className: "steps" },
+        el("li", { textContent: "Stop the registry the way you normally do (systemd, compose or Quadlet)." }),
+        el("li", {}, "Dry run, which lists what would be deleted.", codeBlock("Dry run", [gcCommand(tool, storage, true)])),
+        el("li", {}, "Collect.", codeBlock("Collect", [gcCommand(tool, storage, false)])),
+        el("li", { textContent: "Start the registry again." })),
+      el("p", { className: "mut", textContent: "Never add --delete-untagged: it deletes the child manifests of multi-arch images and breaks them." }),
+      ...(cfg.registryStorage ? [] : [el("p", { className: "hint", textContent: "UI_REGISTRY_STORAGE is not set, so the command has the placeholder <registry-storage>. Replace it with the host path or volume name of the registry data, or set UI_REGISTRY_STORAGE." })]));
+  };
+  draw();
+  return el("section", {}, el("h3", { className: "ssec", textContent: "Garbage collection" }), box);
+}
+const SHORTCUTS = [
+  ["Up, Down", "Move through the tree"], ["Right", "Open a folder, repository or tag, then move to its first child"], ["Left", "Close it, then move to its parent"],
+  ["Home, End", "First or last row"], ["Enter, Space", "Select the row and show its details"], ["Esc", "Close a panel, or the tree on a phone"],
+];
+function shortcutsSection() {
+  return el("section", {}, el("h3", { className: "ssec", textContent: "Shortcuts" }),
+    el("table", { className: "keys" }, ...SHORTCUTS.map(([k, what]) => el("tr", {}, el("th", {}, el("kbd", { textContent: k })), el("td", { textContent: what })))));
+}
+function helpPanel() {
+  const dlg = el("dialog", { className: "settings help", "aria-labelledby": "h-title" },
+    el("div", { className: "shead" }, el("h2", { id: "h-title", textContent: "Help" }),
+      el("button", { type: "button", className: "iconbtn", "aria-label": "Close help", onclick: () => dlg.close() }, icon("close"))),
+    el("div", { className: "sbody" }, gcSection(), shortcutsSection()),
+    el("div", { className: "sfoot" }, el("span"), el("button", { type: "button", className: "primary", textContent: "Done", onclick: () => dlg.close() })));
+  dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+}
 
 // ---- Settings: one panel, changes apply as you make them ----------------------------------------------------------------
 const SETTING_KEYS = ["theme", "runtime", "sort", "live", "interval", "pageSize"];
@@ -879,16 +1460,24 @@ function selectEl(labelId, key, values, text, apply) {
   wrap.draw(false);
   return wrap;
 }
+function lifecycleRow() { // read only: the stages are set by the server
+  const stages = stageList();
+  return el("div", { className: "srow" }, el("div", {}, el("div", { className: "slabel", textContent: "Lifecycle" }), el("div", { className: "sdesc", textContent: "Set by the server (UI_ENVIRONMENTS)." })),
+    el("div", { className: "sctl" }, el("code", { className: "stages", textContent: stages.length ? stages.join(" \u2192 ") : "none" })));
+}
+function applyPrefs(change) { // save a change and do what it needs, at once
+  const before = { ...prefs };
+  Object.assign(prefs, change);
+  savePrefs();
+  if (prefs.theme !== before.theme) applyTheme();
+  if (prefs.live !== before.live) startLive();
+  if (prefs.interval !== before.interval) startPoll();
+  if (prefs.runtime !== before.runtime || prefs.sort !== before.sort || prefs.pageSize !== before.pageSize) { resetShown(); void renderPane(true); }
+}
 function settings() {
   const controls = [];
   const apply = (change) => {
-    const before = { ...prefs };
-    Object.assign(prefs, change);
-    savePrefs();
-    if (prefs.theme !== before.theme) applyTheme();
-    if (prefs.live !== before.live) startLive();
-    if (prefs.interval !== before.interval) startPoll();
-    if (prefs.runtime !== before.runtime || prefs.sort !== before.sort || prefs.pageSize !== before.pageSize) { shown = 0; void renderPane(); }
+    applyPrefs(change);
     controls.forEach((c) => c.draw());
     pollCtl.draw(!prefs.live); // the poll only runs while the stream is down, so it means nothing with auto-refresh off
     pollRow.dataset.off = String(!prefs.live);
@@ -909,6 +1498,7 @@ function settings() {
       section("Commands", row("s-rt", "Command line tool", "Used in the copyable commands.", segmented("s-rt", [["podman", "podman"], ["docker", "docker"]], "runtime", apply))),
       section("Lists", row("s-sort", "Sort by", "Order of tags and folders in lists.", segmented("s-sort", [["recent", "Recent"], ["name", "Name"]], "sort", apply)),
         row("s-rows", "Rows per page", "Rows a list shows before Show more.", selectEl("s-rows", "pageSize", CHOICES.pageSize, String, apply))),
+      section("Lifecycle", lifecycleRow()),
       section("Live updates", row("s-live", "Auto-refresh", "Update the tree and lists as the registry changes.", switchEl("s-live", "live", apply)), pollRow)),
     el("div", { className: "sfoot" },
       el("button", { type: "button", className: "linkbtn", textContent: "Reset to defaults", onclick: () => apply(Object.fromEntries(SETTING_KEYS.map((k) => [k, DEFAULTS[k]]))) }),
@@ -924,6 +1514,7 @@ loadPrefs(); applyTheme();
 setWidth(prefs.sidebar, false);
 for (const id of prefs.expanded) expanded.add(id);
 $("prefs").onclick = () => settings();
+$("help").onclick = () => helpPanel();
 tree.root = { kind: "root", id: "root", name: "Registry", parent: null, kids: new Map(), sortedKids: null };
 tree.byId.set("root", tree.root);
 tree.names = [];

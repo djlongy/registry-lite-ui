@@ -823,6 +823,20 @@ class Routes(unittest.TestCase):
         for bad in ("https://x:5000", "x/y", "x y", "x:5000/"):
             with self.assertRaises(ValueError):
                 S.Config({"UI_REGISTRY_HOST": bad})
+        # the registry storage, shown inside a command to copy: a path or a volume name, never shell syntax
+        self.assertEqual(host({})["registryStorage"], "")
+        for good in ("/data/registry", "/srv/registry-data/", "registry_data", "a1.b-c"):
+            self.assertEqual(host({"UI_REGISTRY_STORAGE": good})["registryStorage"], good)
+        for bad in ("/", "rel/path", "/a b", "/a;rm", "$(x)", "/a/../b", "-v", "a:ro", "/a:ro", "/" + "a" * 260, "a`b`"):
+            with self.assertRaises(ValueError, msg=bad):
+                S.Config({"UI_REGISTRY_STORAGE": bad})
+        # the promote shortcuts: a default list, or the configured one, each a folder name
+        self.assertEqual(host({})["environments"], ["dev", "test", "uat", "staging", "prod"])
+        self.assertEqual(host({"UI_ENVIRONMENTS": " qa , prod "})["environments"], ["qa", "prod"])
+        self.assertEqual(host({"UI_ENVIRONMENTS": "team-a/dev,team-a/prod,prod,prod"})["environments"], ["team-a/dev", "team-a/prod", "prod"])  # order kept, a prefix may have segments, repeats go
+        for bad in ("Dev", "a//b", "/a", "a/", "x y", "dev,Prod", ",".join(f"e{i}" for i in range(13))):
+            with self.assertRaises(ValueError, msg=bad):
+                S.Config({"UI_ENVIRONMENTS": bad})
 
     def test_tagnames_groups_the_pollers_tags_by_repository(self):
         self.cfg.state.tags = {"a/app:v2": {}, "a/app:v1": {}, "b:latest": {}}
@@ -837,8 +851,8 @@ class Routes(unittest.TestCase):
     def test_parents_names_the_tagged_indexes_that_list_a_digest(self):
         parents = self.get["/api/parents"]
         child = parents({"repo": ["a/app"], "digest": [D("b")]})
-        self.assertEqual(child, {"parents": [{"tag": "latest", "platform": ""}, {"tag": "other", "platform": ""}], "more": 0})
-        self.assertEqual(parents({"repo": ["a/app"], "digest": [D("a")]}), {"parents": [], "more": 0})  # a tagged index has no parent
+        self.assertEqual(child, {"parents": [{"tag": "latest", "platform": ""}, {"tag": "other", "platform": ""}], "more": 0, "children": 0, "removable": 0})
+        self.assertEqual(parents({"repo": ["a/app"], "digest": [D("a")]}), {"parents": [], "more": 0, "children": 2, "removable": 2})  # a tagged index has no parent, two children
         self.cfg.client.tags = lambda repo: [f"t{i}" for i in range(7)]  # at most five are named, the rest are counted
         many = parents({"repo": ["a/app"], "digest": [D("b")]})
         self.assertEqual(([p["tag"] for p in many["parents"]], many["more"]), (["t0", "t1", "t2", "t3", "t4"], 2))
