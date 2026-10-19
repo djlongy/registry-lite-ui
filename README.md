@@ -56,7 +56,7 @@ For a registry that already runs as its own service, start the UI alone: `REGIST
 podman build --format docker -f Containerfile -t registry-lite-ui .   # or: docker compose up -d --build
 ```
 
-`--format docker` keeps the `HEALTHCHECK`, which the OCI format drops. CI builds with `buildah` (no docker daemon) for both platforms, runs the unit tests and a podman smoke test, then pushes the manifest list. `.gitlab-ci.yml` does the same with rootless buildah on an unprivileged GitLab runner and pushes to `$CI_REGISTRY_IMAGE`.
+`--format docker` keeps the `HEALTHCHECK`, which the OCI format drops. CI builds with `buildah` (no docker daemon) for both platforms, runs the unit tests and a podman smoke test, then pushes the manifest list. `.gitlab-ci.yml` does the same with rootless buildah on an unprivileged GitLab runner and pushes to `$CI_REGISTRY_IMAGE`. Set the CI variable `BUILDAH_IMAGE` to pull the builder image from an internal mirror.
 
 ## UI only
 
