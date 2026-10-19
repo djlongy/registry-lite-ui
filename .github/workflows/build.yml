@@ -65,7 +65,7 @@ jobs:
         run: |
           printf %s "$GH_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           podman manifest create ui
-          for a in amd64 arm64; do podman load -q -i ui-$a.tar && podman manifest add ui localhost/ui:$a; done
+          for a in amd64 arm64; do podman load -q -i ui-$a.tar && podman manifest add ui containers-storage:localhost/ui:$a; done
           tags=("$GITHUB_SHA")
           [ "$GITHUB_REF" = refs/heads/main ] && tags+=(latest)
           [ "$GITHUB_REF_TYPE" = tag ] && tags+=("${GITHUB_REF_NAME#v}")
