@@ -1,0 +1,11 @@
+# UI without registry credentials
+ Container rlui-registry-1  Started
+registry direct, no creds: 401
+UI /api/repos: {"error": "registry said 401 UNAUTHORIZED: authentication required"}
+# UI with REGISTRY_USER and REGISTRY_PASSWORD_FILE (compose.registry-auth.yml)
+ Container rlui-ui-1  Started
+UI /api/repos: ["lib/alpine", "lib/busybox", "mirror/alpine", "mirror/busybox", "moved/alpine", "scratch/big"]
+password in container env: 0 matches
+push with creds directly: ok
+UI tags: [{"tag": "1", "digest": "sha256:260479a1cfaf304c4c20da7f8405d3ce313513dcd534bb743257bdd2fe0f3e2d"}]
+UI delete probe flag: {"deleteEnabled":true}

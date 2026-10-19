@@ -1,0 +1,56 @@
+### UI up
+registry Up 4 seconds
+ui Up 4 seconds (health: starting)
+== push and pull with skopeo and docker (label up)
+PASS skopeo push multi-arch busybox
+PASS multi-arch busybox digest identical to source
+PASS skopeo push single-arch busybox
+PASS skopeo pull busybox
+PASS docker push then pull busybox
+PASS skopeo push multi-arch alpine
+PASS multi-arch alpine digest identical to source
+PASS skopeo push single-arch alpine
+PASS skopeo pull alpine
+PASS docker push then pull alpine
+failures: 0
+### UI stopped
+registry Up About a minute
+== push and pull with skopeo and docker (label down)
+PASS skopeo push multi-arch busybox
+PASS multi-arch busybox digest identical to source
+PASS skopeo push single-arch busybox
+PASS skopeo pull busybox
+PASS docker push then pull busybox
+PASS skopeo push multi-arch alpine
+PASS multi-arch alpine digest identical to source
+PASS skopeo push single-arch alpine
+PASS skopeo pull alpine
+PASS docker push then pull alpine
+failures: 0
+### UI up again
+== UI operations
+PASS catalog lists lib/busybox
+PASS tag list
+PASS manifest detail shows platforms of an index
+PASS manifest detail shows layers and platform of an image
+-- copy keeps the digest
+PASS index copy: digest identical
+PASS index copy: child platform inspectable
+PASS image copy: digest identical
+PASS image copy: docker pull
+PASS same-repo retag: digest identical
+-- move
+PASS move: destination has the digest, source gone
+PASS move: moved image pullable
+-- delete
+PASS delete: index gone
+PASS delete with children: no child manifest left
+PASS delete: source repo copy untouched
+-- guards
+PASS POST without CSRF token: 403
+PASS POST from foreign Origin: 403
+PASS POST as text/plain: 403
+PASS invalid source name rejected
+PASS uppercase destination rejected
+PASS CSP header set
+failures: 0

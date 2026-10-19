@@ -1,0 +1,37 @@
+# registry:2 is published directly, exactly as before. The UI is a separate service that calls it.
+services:
+  registry:
+    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+    ports: ["${REGISTRY_PORT:-5000}:5000"]
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes: [registry-data:/var/lib/registry]
+    restart: unless-stopped
+
+  ui:
+    build: .
+    ports: ["${UI_PORT:-8080}:8080"]
+    environment:
+      REGISTRY_URL: http://registry:5000
+      UI_READONLY: "${UI_READONLY:-false}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  # Garbage collection of blobs no manifest references. Stop the registry first, see README.
+  # Do not add --delete-untagged: in registry:2.8 it deletes the child manifests of multi-arch images.
+  gc:
+    profiles: [gc]
+    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+    command: registry garbage-collect /etc/docker/registry/config.yml
+    volumes: [registry-data:/var/lib/registry]
+
+  gc-dry:
+    profiles: [gc]
+    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+    command: registry garbage-collect --dry-run /etc/docker/registry/config.yml
+    volumes: [registry-data:/var/lib/registry:ro]
+
+volumes:
+  registry-data:

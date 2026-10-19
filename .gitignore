@@ -1,0 +1,5 @@
+auth/htpasswd
+secrets/
+tests/registry-htpasswd
+__pycache__/
+.env

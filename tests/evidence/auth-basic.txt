@@ -1,0 +1,37 @@
+ Container rlui-ui-1  Started
+ Container rlui-ui-auth-1  Starting
+ Container rlui-ui-auth-1  Started
+registry Up 32 seconds 0.0.0.0:5050->5000/tcp, [::]:5050->5000/tcp
+ui Up 3 seconds (health: starting) 8080/tcp
+ui-auth Up 3 seconds 0.0.0.0:8088->8080/tcp, [::]:8088->8080/tcp
+no credentials:   401
+wrong password:   401
+right password:   200
+registry direct (5050, no auth, unchanged): 200
+ui container port published on host? :0
+== UI operations
+PASS catalog lists lib/busybox
+PASS tag list
+PASS manifest detail shows platforms of an index
+PASS manifest detail shows layers and platform of an image
+-- copy keeps the digest
+PASS index copy: digest identical
+PASS index copy: child platform inspectable
+PASS image copy: digest identical
+PASS image copy: docker pull
+PASS same-repo retag: digest identical
+-- move
+PASS move: destination has the digest, source gone
+PASS move: moved image pullable
+-- delete
+PASS delete: index gone
+PASS delete with children: no child manifest left
+PASS delete: source repo copy untouched
+-- guards
+PASS POST without CSRF token: 403
+PASS POST from foreign Origin: 403
+PASS POST as text/plain: 403
+PASS invalid source name rejected
+PASS uppercase destination rejected
+PASS CSP header set
+failures: 0

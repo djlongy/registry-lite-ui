@@ -1,0 +1,16 @@
+== garbage collection
+PASS docker push scratch image
+PASS UI delete scratch/big with its children
+blob eligible for deletion: sha256:8f08167922ac44d5fd363eb6d7f6e5d90da9bf50d91cc1d3e092b30643688303
+blob eligible for deletion: sha256:aa1d7f67ee91484d678814c8438afc34a1f8fdb4fb82e4abc43c2181daeff6e7
+blob eligible for deletion: sha256:e8d1ab7670bda8b06f333ae07038292203400ccff1d3aa0a246ad06bfb898d15
+time="2026-10-19T00:02:35.785527085Z" level=info msg="Deleting blob: /docker/registry/v2/blobs/sha256/e8/e8d1ab7670bda8b06f333ae07038292203400ccff1d3aa0a246ad06bfb898d15" go.version=go1.20.8 instance.id=fa8d44d5-c849-4a31-925b-4ce25871392b service=registry 
+time="2026-10-19T00:02:35.785582334Z" level=info msg="Deleting blob: /docker/registry/v2/blobs/sha256/1c/1c801b367335adb796ff53f653726e896a70d98cc8c48bb858dd3e804ba4e566" go.version=go1.20.8 instance.id=fa8d44d5-c849-4a31-925b-4ce25871392b service=registry 
+volume KiB before=69312 after=49680
+PASS GC shrank the volume
+PASS full pull after GC: lib/busybox:up-multi
+PASS full pull after GC: lib/busybox:down-multi
+PASS full pull after GC: lib/alpine:up-single
+PASS full pull after GC: lib/alpine:down-multi
+PASS full pull after GC: moved/alpine:v1
+failures: 0

@@ -1,0 +1,23 @@
+issuer: https://dex.example.internal/dex
+storage: {type: memory}
+web: {http: 0.0.0.0:5556}
+staticClients:
+  - id: registry-ui
+    name: registry-ui
+    secret: change-me-and-match-OIDC_CLIENT_SECRET
+    redirectURIs: [https://registry-ui.example.internal/oauth2/callback]
+connectors:
+  - type: ldap
+    id: ldap
+    name: LDAP
+    config:
+      host: ldap.example.internal:636
+      bindDN: cn=svc-dex,ou=services,dc=example,dc=internal
+      bindPW: change-me
+      userSearch:
+        baseDN: ou=people,dc=example,dc=internal
+        filter: "(objectClass=person)"
+        username: uid
+        idAttr: uid
+        emailAttr: mail
+        nameAttr: cn

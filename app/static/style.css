@@ -1,0 +1,17 @@
+:root { --bg:#fff; --fg:#1b1f24; --mut:#59636e; --line:#d1d9e0; --acc:#0969da; --bad:#cf222e; --warn:#fff8c5; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --mut:#8d96a0; --line:#30363d; --acc:#4493f8; --bad:#f85149; --warn:#3d2e00; } }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, sans-serif; }
+header { padding:12px 24px; border-bottom:1px solid var(--line); font-weight:600; }
+header span, .mut { color:var(--mut); font-weight:400; }
+main { padding:16px 24px; max-width:1100px; }
+a { color:var(--acc); text-decoration:none; } a:hover { text-decoration:underline; }
+table { border-collapse:collapse; width:100%; } th, td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); }
+code { font:12px ui-monospace, monospace; word-break:break-all; }
+button { font:inherit; padding:3px 10px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); cursor:pointer; }
+button.danger { color:var(--bad); border-color:var(--bad); }
+#banner { padding:8px 24px; background:var(--warn); border-bottom:1px solid var(--line); }
+#banner.err { color:var(--bad); }
+dialog { border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); max-width:520px; }
+dialog label { display:block; margin:8px 0; } dialog input[type=text] { width:100%; box-sizing:border-box; padding:4px; }
+menu { display:flex; gap:8px; justify-content:flex-end; padding:0; }
+dialog p { overflow-wrap: anywhere; }
