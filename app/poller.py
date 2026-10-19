@@ -60,6 +60,7 @@ class State:
     def __init__(self, path=None, max_events=1000, max_age=30 * 86400, save_every=30, clock=time.time):
         self.path, self.max_events, self.max_age, self.save_every, self.clock = path, max_events, max_age, save_every, clock
         self.tags, self.events, self.seq, self.baselined = {}, deque(), 0, False
+        self.empty = set()  # repositories a full walk found with no tags. In memory only, so unknown again after a restart.
         self.since = clock()
         self.cond = threading.Condition()
         self.saved, self.saved_at, self.dirty = None, 0, False
@@ -72,6 +73,8 @@ class State:
         """Apply one poll. `scanned` repos were walked completely, `observed` maps their refs to digests, `gone` repos left the catalog."""
         now = self.clock()
         with self.cond:
+            seen = {repo_of(k) for k in observed}
+            self.empty = (self.empty | (scanned - seen)) - seen - set(gone)
             old = {k: v["digest"] for k, v in self.tags.items() if repo_of(k) in scanned or repo_of(k) in gone}
             ev = diff(old, observed, now)
             for e in ev:

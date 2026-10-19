@@ -186,6 +186,19 @@ class StateTests(unittest.TestCase):
     def state(self, **kw):
         return P.State(clock=kw.pop("clock", Clock()), **kw)
 
+    def test_empty_repositories_are_the_scanned_ones_with_no_tags(self):
+        st = self.state()
+        st.update({"a", "b", "c"}, {"a:1": "d1"})  # b and c were walked completely and have no tags
+        self.assertEqual(st.empty, {"b", "c"})
+        st.update({"b"}, {"b:2": "d2"})  # a push into b makes it non-empty
+        self.assertEqual(st.empty, {"c"})
+        st.update({"a"}, {})  # the last tag of a is deleted
+        self.assertEqual(st.empty, {"a", "c"})
+        st.update(set(), {}, gone={"c"})  # c left the catalog
+        self.assertEqual(st.empty, {"a"})
+        st.update(set(), {})  # a repository that was not walked this time keeps what is known about it
+        self.assertEqual(st.empty, {"a"})
+
     def test_no_events_before_baseline(self):
         s = self.state()
         s.update({"a"}, {"a:1": "d1"})
@@ -840,13 +853,14 @@ class Routes(unittest.TestCase):
 
     def test_tagnames_groups_the_pollers_tags_by_repository(self):
         self.cfg.state.tags = {"a/app:v2": {}, "a/app:v1": {}, "b:latest": {}}
-        self.assertEqual(self.get["/api/tagnames"]({}), {"repos": {"a/app": ["v1", "v2"], "b": ["latest"]}, "truncated": False})
+        self.cfg.state.empty = {"gone/repo"}
+        self.assertEqual(self.get["/api/tagnames"]({}), {"repos": {"a/app": ["v1", "v2"], "b": ["latest"]}, "truncated": False, "empty": ["gone/repo"]})
         S.MAX_TAGNAMES, cap = 2, S.MAX_TAGNAMES
         try:
             capped = self.get["/api/tagnames"]({})
         finally:
             S.MAX_TAGNAMES = cap
-        self.assertEqual(capped, {"repos": {"a/app": ["v1", "v2"]}, "truncated": True})
+        self.assertEqual(capped, {"repos": {"a/app": ["v1", "v2"]}, "truncated": True, "empty": ["gone/repo"]})
 
     def test_parents_names_the_tagged_indexes_that_list_a_digest(self):
         parents = self.get["/api/parents"]
@@ -859,6 +873,29 @@ class Routes(unittest.TestCase):
         for bad in ({"repo": ["a/app"], "digest": ["latest"]}, {"repo": ["A/app"], "digest": [D("b")]}, {"repo": ["a/app"]}):
             with self.assertRaises(R.RegistryError, msg=bad):
                 parents(bad)
+
+    def test_manifest_config_type_and_created_are_validated(self):
+        def view(config_type, blob):
+            class C(FakeClient):
+                def manifest(self, repo, ref, head=False):
+                    cfg = {"digest": D("1"), **({"mediaType": config_type} if config_type else {})}
+                    return (('{"config":%s,"layers":[]}' % json.dumps(cfg)).encode(), IMG, D("a"))
+
+                def call(self, method, path, headers=None, body=None, ok=(200,)):
+                    return 200, {}, json.dumps(blob).encode()
+            return S.view_manifest(C(), "a/app", "1.0", with_tags=False)
+        chart = view("application/vnd.cncf.helm.config.v1+json", {"name": "demo", "version": "0.2.0"})
+        self.assertEqual(chart["configType"], "application/vnd.cncf.helm.config.v1+json")
+        self.assertNotIn("created", chart)  # a chart config has no build time
+        self.assertNotIn("platform", chart)  # nor an os or architecture
+        img = view("application/vnd.oci.image.config.v1+json", {"os": "linux", "architecture": "arm64", "created": "2025-03-01T10:20:30.123456789Z"})
+        self.assertEqual((img["created"], img["platform"]["os"]), ("2025-03-01T10:20:30.123456789Z", "linux"))
+        self.assertEqual(view("", {"created": "2025-03-01T10:20:30+11:00"})["created"], "2025-03-01T10:20:30+11:00")
+        self.assertNotIn("configType", view("", {}))
+        for bad in ("text/html; x=y", "NOTVALID", "a b/c", "x/" + "y" * 200, "image/<script>"):
+            self.assertNotIn("configType", view(bad, {}), bad)
+        for bad in ("yesterday", "2025-03-01", "2025-03-01T10:20:30", "<b>2025-03-01T10:20:30Z</b>", 20250301):
+            self.assertNotIn("created", view("", {"created": bad}), bad)
 
     def test_manifest_without_tags_makes_no_tag_listing(self):
         listed = []

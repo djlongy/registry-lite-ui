@@ -42,6 +42,8 @@ HOST_RE = re.compile(r"[A-Za-z0-9.-]+(:\d{1,5})?|\[[0-9A-Fa-f:]+\](:\d{1,5})?")
 DEFAULT_ENVIRONMENTS = "dev,test,uat,staging,prod"  # the lifecycle stages, in order, that the copy and move dialogs offer as promote shortcuts
 MAX_ENVIRONMENTS = 12
 MAX_TAGNAMES = 5000  # tag names /api/tagnames returns, so the answer stays small on a very large registry
+MEDIA_TYPE_RE = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}")
+CREATED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})")  # RFC 3339, the form image config blobs use
 MAX_BODY = 4096  # bytes of JSON accepted on a POST
 HEALTHZ = "/healthz"
 HEADER_SECS, BODY_SECS = 10, 10  # whole-request limits against clients that send a byte at a time
@@ -116,9 +118,16 @@ def view_manifest(c, repo, ref, with_tags=True):
     out["layers"] = [descriptor(d) for d in m.get("layers", [])]
     if "config" in m:
         out["config"] = R.check_digest(m["config"].get("digest"))
-        try:  # the config blob names os/arch; best effort, it may be an artifact config
+        ctype = m["config"].get("mediaType")
+        if isinstance(ctype, str) and MEDIA_TYPE_RE.fullmatch(ctype):
+            out["configType"] = ctype  # tells an image from a Helm chart or another artifact
+        try:  # the config blob names os/arch and when the image was built; best effort, it may be an artifact config
             cfg = R.json_load(c.call("GET", f"/v2/{repo}/blobs/{out['config']}")[2])
-            out["platform"] = {k: cfg[k] for k in ("os", "architecture") if k in cfg}
+            platform = {k: cfg[k] for k in ("os", "architecture") if k in cfg}
+            if platform:
+                out["platform"] = platform
+            if isinstance(cfg.get("created"), str) and CREATED_RE.fullmatch(cfg["created"]):
+                out["created"] = cfg["created"]
         except R.RegistryError:
             pass
     return out
@@ -196,12 +205,13 @@ def routes(cfg):
     def tagnames(q):  # tag names the poller has seen, so the filter can match tags without a tags call per repository
         with cfg.state.cond:
             refs = list(cfg.state.tags)  # copied under the lock, sorted and capped outside it
+            empty = cfg.state.empty.copy()
         refs.sort()
         out = {}
         for ref in refs[:MAX_TAGNAMES]:
             repo, _, tag = ref.rpartition(":")
             out.setdefault(repo, []).append(tag)
-        return {"repos": out, "truncated": len(refs) > MAX_TAGNAMES}
+        return {"repos": out, "truncated": len(refs) > MAX_TAGNAMES, "empty": sorted(empty)[:MAX_TAGNAMES]}
 
     def parents(q):  # the tagged indexes that list a digest as a child: what delete and move would refuse (409), shown up front
         repo, digest = R.check_repo(one(q, "repo")), one(q, "digest")

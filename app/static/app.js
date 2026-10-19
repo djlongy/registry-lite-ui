@@ -8,7 +8,7 @@ let updated = null;
 
 // Preferences only, no data or secrets. Storage may be blocked, so every access is guarded.
 // expanded and selected are the tree state (node ids and the location hash), sidebar is its width in px.
-const DEFAULTS = { theme: "system", sort: "recent", live: true, interval: 30, pageSize: 50, runtime: "podman", sidebar: 280, selected: "/recent", expanded: [] };
+const DEFAULTS = { theme: "system", sort: "recent", live: true, interval: 30, pageSize: 50, runtime: "podman", showEmpty: false, sidebar: 280, selected: "/recent", expanded: [] };
 const CHOICES = { theme: ["system", "light", "dark"], sort: ["recent", "name"], runtime: ["podman", "docker"], interval: [10, 30, 60, 300], pageSize: [25, 50, 100, 200] };
 const MAX_EXPANDED = 500;
 const SIDEBAR = [180, 640];
@@ -79,6 +79,8 @@ const ICONS = {
   monitor: [["s", "M2.5 3h11v7.5h-11zM6 13.5h4M8 10.5v3"]],
   close: [["s", "M4 4l8 8M12 4l-8 8"]],
   arrow: [["s", "M8 12.5v-9M4.5 7L8 3.5 11.5 7"]],
+  chart: [["s", "M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 6.4a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2zM8 1.8v4.6M8 9.6v4.6M2.6 4.9l4 2.3M9.4 8.8l4 2.3M2.6 11.1l4-2.3M9.4 7.2l4-2.3"]],
+  artifact: [["s", "M8 1.8l5.5 3v6.4L8 14.2l-5.5-3V4.8zM2.5 4.8L8 7.8l5.5-3M8 7.8v6.4"]],
   clock: [["s", "M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zM8 4.8V8l2.2 1.4"]],
 };
 const iconCache = new Map();
@@ -159,7 +161,7 @@ function paged(rows, headers) {
 // Only what is expanded is rendered, and tags and platforms are fetched when their parent first opens.
 const tree = {
   root: null, byId: new Map(), byPath: new Map(), sel: null, focus: null,
-  filter: "", matches: null, closed: new Set(), flashes: new Map(), tagIndex: new Map(), tm: new Map(), pathHit: new Set(), indexStale: true, truncated: false,
+  filter: "", matches: null, closed: new Set(), flashes: new Map(), tagIndex: new Map(), empty: new Set(), emptyKey: "", tm: new Map(), pathHit: new Set(), indexStale: true, truncated: false,
 };
 const expanded = new Set();
 const manifests = new Map(); // "repo@digest" -> manifest JSON; cleared for a repo when it changes
@@ -213,13 +215,28 @@ function applyCatalog(names, flashNew) {
 function kidsOf(n) {
   if (n.kind === "tag") return n.plats || [];
   if (n.kind === "plat") return [];
-  const k = folderKids(n);
+  const k = visibleKids(n);
   return n.kind === "node" && n.repo ? [...k, ...n.tagList] : k;
 }
 function folderKids(n) { // the child folders and repositories, by name, kept until they change
   if (!n.sortedKids) n.sortedKids = [...n.kids.values()].sort(byName);
   return n.sortedKids;
 }
+// Repositories with no tags are left out unless Settings says to show them. Whether one is empty comes from what is already known: its tags
+// if they are loaded, else the poller's list of repositories it walked and found empty (/api/tagnames). Unknown counts as not empty, so it shows.
+function isEmptyRepo(n) {
+  if (!n.repo) return false;
+  if (n.fresh && !n.err) return n.tagList.length === 0;
+  return tree.empty.has(n.path) && !tree.tagIndex.has(n.path);
+}
+let hiddenMemo = new Map();
+const resetHidden = () => { hiddenMemo = new Map(); };
+function isHidden(n) { // an empty repository, or a folder that holds only those
+  if (prefs.showEmpty || n.kind !== "node") return false;
+  if (!hiddenMemo.has(n.id)) hiddenMemo.set(n.id, (!n.repo || isEmptyRepo(n)) && [...n.kids.values()].every((k) => isHidden(k)));
+  return hiddenMemo.get(n.id);
+}
+const visibleKids = (n) => folderKids(n).filter((k) => !isHidden(k));
 function expandable(n) {
   if (n.kind === "root") return true;
   if (n.kind === "node") return n.kids.size > 0 || n.repo;
@@ -259,8 +276,13 @@ function loadTagIndex() { // one small request, made when the filter is first us
   indexLoading = api("/api/tagnames").then((o) => {
     tree.tagIndex = new Map(Object.entries(o.repos));
     tree.truncated = o.truncated;
+    const empty = o.empty || [], key = empty.join("\n");
+    const changed = key !== tree.emptyKey;
+    tree.empty = new Set(empty);
+    tree.emptyKey = key;
     tree.indexStale = false;
     tree.matches = null;
+    if (changed) { resetHidden(); void renderPane(); } // what is hidden changed, so the lists change too
   }).catch(() => { /* the filter then matches repository names only */ }).finally(() => { indexLoading = null; scheduleTree(); });
 }
 
@@ -313,7 +335,7 @@ function getManifest(path, ref, digest, fresh) {
   if (!fresh && manifests.has(key)) return Promise.resolve(manifests.get(key));
   if (!fresh && inflight.has(key)) return inflight.get(key);
   // tags=0 skips the server's tag lookup (one listing and a HEAD per tag). Only a fresh read, for delete and move, asks for it.
-  const p = api(`/api/manifest?repo=${encodeURIComponent(path)}&ref=${encodeURIComponent(ref)}${fresh ? "" : "&tags=0"}`).then((m) => { manifests.set(key, m); return m; }).finally(() => inflight.delete(key));
+  const p = api(`/api/manifest?repo=${encodeURIComponent(path)}&ref=${encodeURIComponent(ref)}${fresh ? "" : "&tags=0"}`).then((m) => { manifests.set(key, m); scheduleTree(); return m; }).finally(() => inflight.delete(key));
   inflight.set(key, p);
   return p;
 }
@@ -342,7 +364,7 @@ let rows = []; // visible entries, in order
 function visible() {
   rows = [];
   const filtering = !!tree.filter, ok = filtering ? matchSet() : null;
-  if (filtering && tree.indexStale) loadTagIndex();
+  if (tree.indexStale && (filtering || !prefs.showEmpty)) loadTagIndex();
   if (filtering && !ok.size) { rows.push({ info: "No repositories or tags match" + (tree.truncated ? " (tag search covers only the first 5000 tags)" : ""), depth: 0, anc: [], last: true }); return; }
   const walk = (n, depth, anc, pos, count, last) => {
     rows.push({ n, depth, anc, pos, count, last });
@@ -370,7 +392,7 @@ function guidesFor(r) { // the connector lines of a row: a vertical for each anc
 }
 function iconFor(n, open) {
   if (n.kind === "root") return icon("registry");
-  if (n.kind === "tag") return icon("whale", "whale");
+  if (n.kind === "tag") return kindIcon(tagKind(n));
   if (n.kind === "plat") return icon("chip");
   return icon(open ? "folderOpen" : "folder");
 }
@@ -404,7 +426,7 @@ let treeQueued = false;
 function scheduleTree() { if (!treeQueued) { treeQueued = true; requestAnimationFrame(() => { treeQueued = false; renderTree(); }); } }
 function rowSig(r) { // what a row looks like, so an unchanged one is reused
   const n = r.n;
-  const own = n ? [isOpen(n), n.kind === "node" && n.repo, n.id === tree.sel, n.id === tree.focus, n.name, expandable(n)] : [];
+  const own = n ? [isOpen(n), n.kind === "node" && n.repo, n.id === tree.sel, n.id === tree.focus, n.name, expandable(n), n.kind === "tag" && tagKind(n)] : [];
   return [r.depth, r.anc.join(""), r.last, r.pos, r.count, ...own].join("|");
 }
 function cachedRow(r, keep) {
@@ -416,6 +438,7 @@ function cachedRow(r, keep) {
   return e;
 }
 function renderTree() {
+  resetHidden();
   const box = $("tree");
   const hadFocus = box.contains(document.activeElement);
   const top = box.scrollTop;
@@ -447,8 +470,10 @@ function hashOf(n) {
 function go(n) { if (location.hash === hashOf(n)) void navigate(); else location.hash = hashOf(n); }
 function toggle(n, force) {
   const open = force === undefined ? !isOpen(n) : force;
-  if (autoOpen(n)) { if (open) tree.closed.delete(n.id); else tree.closed.add(n.id); }
-  else if (open) expanded.add(n.id); else expanded.delete(n.id);
+  const set = autoOpen(n) ? tree.closed : expanded; // while filtering, a folder's state is kept apart from the saved one
+  const add = autoOpen(n) ? !open : open;
+  if (add) set.add(n.id);
+  else set.delete(n.id);
   prefs.expanded = [...expanded].slice(-MAX_EXPANDED);
   savePrefs();
   renderTree();
@@ -603,28 +628,61 @@ function codeBlock(label, lines) {
   return el("figure", { className: "code" }, el("figcaption", {}, el("span", { textContent: label }), btn), pre);
 }
 // tag is empty at repository level, where <TAG> stands in. digest is empty unless a tag is selected.
-function commandsEl(path, tag, digest) {
-  const host = cfg.registryHost || "<REGISTRY>";
+// The command tabs for each kind of thing a tag can be. ctx: {host, path, tag, digest}; tag is "" at repository level. Returns the tabs,
+// what each shows (given the podman or docker choice), whether that choice matters, and a heading.
+const cmdNote = (t) => el("p", { className: "mut", textContent: t });
+function imageCommands({ host, path, tag, digest }) {
   const image = `${host}/${path}:${tag || "<TAG>"}`;
-  const note = (t) => el("p", { className: "mut", textContent: t });
-  const content = {
-    pull: (rt) => [note(`Run ${rt} pull with the image and tag.`), codeBlock("Pull by tag", [`${rt} pull ${image}`]),
-      ...(digest ? [note("A digest always gives the same image, even if the tag is later moved."), codeBlock("Pull by digest", [`${rt} pull ${host}/${path}@${digest}`])] : [])],
-    push: (rt) => [note(`Tag a local image with the registry address, then push it.`), codeBlock("Tag and push", [`${rt} tag <local-image> ${image}`, `${rt} push ${image}`])],
-    configure: (rt) => {
-      const dir = (rt === "docker" ? "/etc/docker" : "/etc/containers") + "/certs.d/" + host;
-      return [note(`If the registry uses a certificate your machine does not trust, put its CA certificate where ${rt} looks for it.`),
-        codeBlock("Trust the registry certificate", [`sudo mkdir -p ${dir}`, `sudo cp ca.crt ${dir}/ca.crt`]),
-        note("When the registry needs a login, sign in once."), codeBlock("Log in", [`${rt} login ${host}`])];
+  return {
+    heading: tag ? "Use this image" : "Use this repository", tool: true,
+    names: [["pull", "Pull"], ["push", "Push"], ["configure", "Configure"]],
+    content: {
+      pull: (rt) => [cmdNote(`Run ${rt} pull with the image and tag.`), codeBlock("Pull by tag", [`${rt} pull ${image}`]),
+        ...(digest ? [cmdNote("A digest always gives the same image, even if the tag is later moved."), codeBlock("Pull by digest", [`${rt} pull ${host}/${path}@${digest}`])] : [])],
+      push: (rt) => [cmdNote("Tag a local image with the registry address, then push it."), codeBlock("Tag and push", [`${rt} tag <local-image> ${image}`, `${rt} push ${image}`])],
+      configure: (rt) => {
+        const dir = (rt === "docker" ? "/etc/docker" : "/etc/containers") + "/certs.d/" + host;
+        return [cmdNote(`If the registry uses a certificate your machine does not trust, put its CA certificate where ${rt} looks for it.`),
+          codeBlock("Trust the registry certificate", [`sudo mkdir -p ${dir}`, `sudo cp ca.crt ${dir}/ca.crt`]),
+          cmdNote("When the registry needs a login, sign in once."), codeBlock("Log in", [`${rt} login ${host}`])];
+      },
     },
   };
-  const names = [["pull", "Pull"], ["push", "Push"], ["configure", "Configure"]];
+}
+function helmCommands({ host, path, tag }) {
+  const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  const version = tag || "<VERSION>";
+  return {
+    heading: tag ? "Use this chart" : "Use this repository", tool: false,
+    names: [["pull", "Pull"], ["push", "Push"], ["configure", "Configure"]],
+    content: {
+      pull: () => [cmdNote("The tag is the chart version."), codeBlock("Pull the chart", [`helm pull oci://${host}/${path} --version ${version}`])],
+      push: () => [cmdNote(`Package the chart, then push the archive. The chart's name is added to the path, so it lands in ${path}.`),
+        codeBlock("Push the chart", [`helm push <chart>.tgz oci://${host}${parent ? "/" + parent : ""}`])],
+      configure: () => [cmdNote("When the registry needs a login, sign in once."), codeBlock("Log in", [`helm registry login ${host}`]),
+        cmdNote("If the registry uses a certificate your machine does not trust, add --ca-file with its CA certificate to each helm command."),
+        codeBlock("With a private CA", [`helm registry login ${host} --ca-file ca.crt`, `helm pull oci://${host}/${path} --version ${version} --ca-file ca.crt`])],
+    },
+  };
+}
+function artifactCommands({ host, path, tag, digest }) {
+  return {
+    heading: "Use this artifact", tool: false, names: [["pull", "Pull"]],
+    content: { pull: () => [cmdNote("An OCI artifact, not an image. Pull it with oras."), codeBlock("Pull by tag", [`oras pull ${host}/${path}:${tag || "<TAG>"}`]),
+      ...(digest ? [codeBlock("Pull by digest", [`oras pull ${host}/${path}@${digest}`])] : [])] },
+  };
+}
+const COMMAND_SETS = { image: imageCommands, helm: helmCommands, artifact: artifactCommands };
+function commandsEl(path, tag, digest, kind = "image") {
+  const host = cfg.registryHost || "<REGISTRY>";
+  const sets = COMMAND_SETS[kind]({ host, path, tag, digest }), names = sets.names;
   const tabs = el("div", { role: "tablist", className: "tabs", "aria-label": "Command helpers" });
-  const seg = el("div", { className: "seg", role: "group", "aria-label": "Command line tool" });
+  const seg = el("div", { className: "seg", role: "group", "aria-label": "Command line tool", hidden: !sets.tool });
   const panel = el("div", { role: "tabpanel", className: "cmd-panel" });
   const draw = () => {
+    const cur = names.some(([k]) => k === cmdTab) ? cmdTab : names[0][0];
     tabs.replaceChildren(...names.map(([k, text]) => el("button", {
-      type: "button", role: "tab", textContent: text, id: "tab-" + k, tabIndex: k === cmdTab ? 0 : -1, "aria-selected": String(k === cmdTab), "aria-controls": "cmd-panel",
+      type: "button", role: "tab", textContent: text, id: "tab-" + k, tabIndex: k === cur ? 0 : -1, "aria-selected": String(k === cur), "aria-controls": "cmd-panel",
       onclick: () => { cmdTab = k; draw(); },
       onkeydown: (e) => {
         const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
@@ -640,12 +698,12 @@ function commandsEl(path, tag, digest) {
       onclick: () => { prefs.runtime = rt; savePrefs(); draw(); },
     })));
     panel.id = "cmd-panel";
-    panel.setAttribute("aria-labelledby", "tab-" + cmdTab);
-    panel.replaceChildren(...content[cmdTab](prefs.runtime),
+    panel.setAttribute("aria-labelledby", "tab-" + cur);
+    panel.replaceChildren(...sets.content[cur](prefs.runtime),
       ...(cfg.registryHostSet ? [] : [el("p", { className: "hint", textContent: `The address ${host} comes from REGISTRY_URL because UI_REGISTRY_HOST is not set. Set it to the address your clients use.` })]));
   };
   draw();
-  return el("section", { className: "cmds" }, el("h3", { textContent: tag ? "Use this image" : "Use this repository" }), el("div", { className: "cmd-bar" }, tabs, seg), panel);
+  return el("section", { className: "cmds" }, el("h3", { textContent: sets.heading }), el("div", { className: "cmd-bar" }, tabs, seg), panel);
 }
 
 // ---- Right pane --------------------------------------------------------------------------------------------------
@@ -687,7 +745,8 @@ function resetShown() {
 const SEMVER = /^v?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 function parseTag(tag) {
   const m = SEMVER.exec(tag);
-  return m ? { nums: m[1].split(".").map(Number), pre: m[2] ? m[2].split(".") : [] } : null;
+  if (!m) return null;
+  return { nums: m[1].split(".").map(Number), pre: m[2] ? m[2].split(".") : [] };
 }
 function cmpNums(a, b) {
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
@@ -720,6 +779,21 @@ function tagCompare(a, b) {
 }
 const numCmp = (x, y) => x - y;
 const loadedManifest = (t) => manifests.get(`${t.parent.path}@${t.digest}`);
+// What a manifest holds, from the media type of its config: a container image (also what an index and an unknown manifest count as),
+// a Helm chart, or some other OCI artifact.
+const IMAGE_CONFIGS = new Set(["application/vnd.docker.container.image.v1+json", "application/vnd.oci.image.config.v1+json"]);
+const HELM_CONFIG = "application/vnd.cncf.helm.config.v1+json";
+function artifactKind(m) {
+  const type = m?.configType;
+  if (!type || IMAGE_CONFIGS.has(type)) return "image";
+  return type === HELM_CONFIG ? "helm" : "artifact";
+}
+const tagKind = (t) => artifactKind(loadedManifest(t));
+const KIND_ICON = { image: ["whale", "whale"], helm: ["chart", "chart"], artifact: ["artifact", ""] };
+const kindIcon = (kind) => icon(...KIND_ICON[kind]);
+const KIND_LABEL = { image: "Container image", helm: "Helm chart", artifact: "OCI artifact" };
+const createdMs = (m) => (m?.created ? Date.parse(m.created) : Number.NaN);
+const createdOf = (t) => { const ms = createdMs(loadedManifest(t)); return Number.isNaN(ms) ? null : ms; };
 const sizeOf = (t) => { const m = loadedManifest(t); return m && !m.index ? layersTotal(m) : null; };
 const platformsOf = (t) => { const m = loadedManifest(t); return m ? detailCells(m)[0] || null : null; };
 // Columns: val(item) is the sort key or null (a row without one goes last in either direction), cmp compares two keys.
@@ -728,7 +802,8 @@ const TAG_COLUMNS = [
   { key: "digest", label: "Digest", tip: "Groups the tags that share a digest", val: (t) => t.digest, cmp: collator.compare },
   { key: "size", label: "Size", tip: "Sorts loaded rows. A multi-arch index has no size of its own.", val: sizeOf, cmp: numCmp },
   { key: "platforms", label: "Platforms", tip: "Sorts loaded rows", val: platformsOf, cmp: collator.compare },
-  { key: "changed", label: "Changed", val: (t) => t.changed || null, cmp: numCmp },
+  { key: "created", label: "Created", tip: "Sorts loaded rows. When the image was built, from its config. A multi-arch index has none.", val: createdOf, cmp: numCmp },
+  { key: "changed", label: "Changed", tip: "When this UI saw the tag change", val: (t) => t.changed || null, cmp: numCmp },
 ];
 const tagDefault = (a, b) => (prefs.sort === "recent" ? (b.changed || 0) - (a.changed || 0) : 0) || tagCompare(a.tag, b.tag);
 function sortItems(items, col, dir, tie) {
@@ -746,7 +821,8 @@ const FILTER_MIN = 1; // the filter and count show for any list with more than o
 function sortHeader(st, col, redraw) {
   const active = st.sort?.key === col.key;
   const dir = st.sort?.dir;
-  const button = el("button", { type: "button", className: "thbtn", title: col.tip || "", onclick: () => { cycleSort(st, col.key); redraw(); } }, col.label, active ? icon("arrow", dir < 0 ? "desc" : "") : null);
+  const direction = dir < 0 ? "desc" : "";
+  const button = el("button", { type: "button", className: "thbtn", title: col.tip || "", onclick: () => { cycleSort(st, col.key); redraw(); } }, col.label, active ? icon("arrow", direction) : null);
   let aria = "none";
   if (active) aria = dir < 0 ? "descending" : "ascending";
   return el("th", { "aria-sort": aria }, button);
@@ -770,7 +846,7 @@ function listView(spec) {
     const page = st.shown || prefs.pageSize;
     const visible = orderedItems(spec, st, list).slice(0, page);
     head.replaceChildren(...spec.columns.map((c) => sortHeader(st, c, draw)));
-    body.replaceChildren(...(visible.length ? visible.map(spec.row) : [noMatches(spec.columns.length)]));
+    body.replaceChildren(...(visible.length ? visible.map((item) => spec.row(item)) : [noMatches(spec.columns.length)]));
     count.textContent = countText(visible.length, list.length, spec.items.length, !!text);
     const left = list.length - visible.length;
     more.replaceChildren(...(left > 0 ? [el("button", { type: "button", textContent: `Show more (${left} left)`, onclick: () => { st.shown = page + prefs.pageSize; draw(); } })] : []));
@@ -820,35 +896,47 @@ function lazyWatch(r) {
   }
 }
 
-function tagRow(t) { // a table row for a tag, whose size and platforms fill in later
-  const plat = el("td", { className: "mut" }), sz = el("td", { className: "mut" });
+function tagRow(t) { // a table row for a tag, whose kind, size, platforms and build time fill in later
+  const plat = el("td", { className: "mut" }), sz = el("td", { className: "mut" }), built = el("td", { className: "mut" });
+  const ico = el("span", { className: "ico" }, kindIcon(tagKind(t)), link(t, t.tag));
   const r = { t, done: false };
-  r.apply = (m) => { [plat.textContent, sz.textContent] = detailCells(m); r.done = true; };
+  r.apply = (m) => {
+    [plat.textContent, sz.textContent] = detailCells(m);
+    const ms = createdMs(m);
+    built.textContent = Number.isNaN(ms) ? "" : ago(ms / 1000);
+    built.title = Number.isNaN(ms) ? "" : new Date(ms).toLocaleString();
+    ico.firstChild.replaceWith(kindIcon(artifactKind(m)));
+    r.done = true;
+  };
   const cached = loadedManifest(t);
   if (cached) r.apply(cached);
   const ref = `${cfg.registryHost || "<REGISTRY>"}/${t.parent.path}:${t.tag}`;
-  r.tr = el("tr", {}, el("td", {}, el("span", { className: "ico" }, icon("whale", "whale"), link(t, t.tag)), rowCopy(ref, `Copy image reference for ${t.tag}`)),
-    el("td", { className: "nw" }, code(short(t.digest)), rowCopy(t.digest, `Copy digest for ${t.tag}`)), sz, plat, el("td", { className: "mut", textContent: ago(t.changed) }));
+  r.tr = el("tr", {}, el("td", {}, ico, rowCopy(ref, `Copy image reference for ${t.tag}`)),
+    el("td", { className: "nw" }, code(short(t.digest)), rowCopy(t.digest, `Copy digest for ${t.tag}`)), sz, plat, built, el("td", { className: "mut", textContent: ago(t.changed) }));
   return r;
 }
 function tagsList(n) {
   lazyReset();
   const rowsOf = new Map();
-  const entry = (t) => { if (!rowsOf.has(t)) rowsOf.set(t, tagRow(t)); return rowsOf.get(t); };
+  const entry = (t) => {
+    if (!rowsOf.has(t)) rowsOf.set(t, tagRow(t));
+    return rowsOf.get(t);
+  };
   return listView({
     id: "tags:" + n.path, items: n.tagList, columns: TAG_COLUMNS, defaultCmp: tagDefault, tie: (a, b) => tagCompare(a.tag, b.tag),
     match: (t, text) => t.tag.toLowerCase().includes(text), placeholder: "Filter tags",
     row: (t) => entry(t).tr, onDraw: (vis) => vis.forEach((t) => lazyWatch(entry(t))),
-    lateKeys: ["size", "platforms"], onLate: (redraw) => { lazy.redraw = redraw; },
+    lateKeys: ["size", "platforms", "created"], onLate: (redraw) => { lazy.redraw = redraw; },
   });
 }
 
 function childrenList(n) {
-  const changed = new Map([...n.kids.values()].map((k) => [k, lastChange(k)]));
+  const items = visibleKids(n);
+  const changed = new Map(items.map((k) => [k, lastChange(k)]));
   const kindOf = (k) => (k.repo ? "repository" : "folder");
   const byRecent = (a, b) => changed.get(b) - changed.get(a) || byName(a, b);
   return listView({
-    id: "kids:" + n.id, items: [...n.kids.values()], tie: byName, defaultCmp: prefs.sort === "recent" ? byRecent : byName,
+    id: "kids:" + n.id, items, tie: byName, defaultCmp: prefs.sort === "recent" ? byRecent : byName,
     columns: [
       { key: "name", label: "Name", val: (k) => k.name, cmp: collator.compare },
       { key: "type", label: "Type", val: kindOf, cmp: collator.compare },
@@ -872,26 +960,47 @@ function recentPane() {
     ...(rows.length ? paged(rows, ["When", "Change", "Image", "Digest"]) : [el("p", { className: "mut", textContent: empty })]));
 }
 function rootPane(n) {
-  showMain(crumbs(n), el("h2", { textContent: "Repositories" }), el("p", { className: "mut", textContent: `${tree.names.length} repositories, ${recent.tags} tags known to the poller.` }),
-    ...(n.kids.size ? childrenList(n) : [el("p", { className: "mut", textContent: "The catalog is empty." })]));
+  const repos = tree.names.filter((p) => !isHidden(tree.byPath.get(p))).length, hidden = tree.names.length - repos;
+  const hiddenNote = hidden ? " (" + hidden + " empty hidden)" : "";
+  showMain(crumbs(n), el("h2", { textContent: "Repositories" }), el("p", { className: "mut", textContent: `${repos} repositories${hiddenNote}, ${recent.tags} tags known to the poller.` }),
+    ...(visibleKids(n).length ? childrenList(n) : [el("p", { className: "mut", textContent: "The catalog is empty." })]));
 }
 // size and platforms of a tag, from its manifest. Fetched on demand, because the manifest call lists every tag in the repo.
 const layersTotal = (m) => m.layers.reduce((a, l) => a + (l.size || 0), 0);
 function detailCells(m) {
   if (m.index) { // attestation manifests show as unknown/unknown and are not platforms
-    const names = [...new Set(m.platforms.map(platName).filter((p) => p !== "unknown/unknown"))];
+    const names = [...new Set(m.platforms.map((p) => platName(p)).filter((p) => p !== "unknown/unknown"))];
     return [names.length > 4 ? names.slice(0, 4).join(", ") + ` +${names.length - 4}` : names.join(", "), ""];
   }
   return [m.platform ? `${m.platform.os}/${m.platform.architecture}` : "", size(layersTotal(m))];
 }
+function repoKind(n) { // a repository of charts or artifacts, as far as the loaded tags tell
+  return n.tagList.map((t) => tagKind(t)).find((k) => k !== "image") || "image";
+}
+const trimSlash = (p) => (p.endsWith("/") ? p.slice(0, -1) : p);
+// A volume name is not a path: relative to the current directory it could delete the wrong thing, so ask the tool where the volume is.
+function rmRepoCommand(repo) {
+  const sub = `/docker/registry/v2/repositories/${repo}`;
+  const storage = cfg.registryStorage || "<registry-storage>";
+  if (cfg.registryStorage && !storage.startsWith("/")) return `rm -r "$(${prefs.runtime} volume inspect -f '{{.Mountpoint}}' '${storage}')${sub}"`;
+  return `rm -r '${trimSlash(storage)}${sub}'`;
+}
+const storageHint = () => (cfg.registryStorage ? [] : [el("p", { className: "hint", textContent: "UI_REGISTRY_STORAGE is not set, so the command has the placeholder <registry-storage>. Replace it with the host path or volume name of the registry data, or set UI_REGISTRY_STORAGE." })]);
+// The registry API cannot delete a repository, and the catalog lists one whose tags are all gone. Its directory has to be removed with the registry stopped.
+function emptyRepoNote(n) {
+  if (!n.fresh || n.loading) return [el("p", { className: "mut", textContent: "Loading..." })];
+  const note = el("p", { className: "mut", textContent: "No tags. The registry API cannot delete a repository. To remove it, stop the registry and delete its directory." });
+  if (repoError(n.path)) return [note]; // never put an odd name into a command
+  return [note, codeBlock("Remove the empty repository (registry stopped)", [rmRepoCommand(n.path)]), ...storageHint()];
+}
 function repoPane(n) {
-  const tags = n.tagList.length ? tagsList(n) : [el("p", { className: "mut", textContent: n.fresh && !n.loading ? "No tags." : "Loading..." })];
-  const kids = n.kids.size ? [el("h3", { textContent: "Folders" }), ...childrenList(n)] : [];
+  const tags = n.tagList.length ? tagsList(n) : emptyRepoNote(n);
+  const kids = visibleKids(n).length ? [el("h3", { textContent: "Folders" }), ...childrenList(n)] : [];
   showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("folderOpen")), n.path), el("p", { className: "reporef" }, copyValue(`${cfg.registryHost || "<REGISTRY>"}/${n.path}`, "Copy repository reference")),
-    ...(n.err ? [el("p", { className: "mut", textContent: n.err })] : []), ...tags, ...kids, commandsEl(n.path, "", ""));
+    ...(n.err ? [el("p", { className: "mut", textContent: n.err })] : []), ...tags, ...kids, commandsEl(n.path, "", "", repoKind(n)));
 }
 function folderPane(n) {
-  showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("folderOpen")), n.path), ...(n.kids.size ? childrenList(n) : []));
+  showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("folderOpen")), n.path), ...(visibleKids(n).length ? childrenList(n) : []));
 }
 
 function actions(repo, ref, digest) {
@@ -904,7 +1013,7 @@ function actions(repo, ref, digest) {
     }
   };
   const blockText = (r) => {
-    if (!r || !r.parents.length) return "";
+    if (!r?.parents.length) return "";
     const plats = [...new Set(r.parents.map((p) => p.platform).filter(Boolean))].sort((a, b) => a.localeCompare(b));
     const tags = r.parents.map((p) => p.tag).join(", ") + (r.more ? ` and ${r.more} more` : "");
     return `This manifest is ${plats.length ? plats.join(", ") : "a child"} inside ${tags}. Delete or retag those first.`;
@@ -931,10 +1040,13 @@ const subTable = (title, head, items) => (items.length ? [el("h3", { textContent
 function manifestProps(n, m, path, sharing) {
   const host = cfg.registryHost || "<REGISTRY>";
   const props = [];
+  const kind = artifactKind(m);
+  if (kind !== "image") props.push(tableRow("Type", kind === "helm" ? KIND_LABEL.helm : `${KIND_LABEL.artifact}, ${m.configType}`));
   if (n.kind === "tag") props.push(tableRow("Image", copyValue(`${host}/${path}:${n.tag}`, "Copy image reference")));
   props.push(tableRow("Pinned", copyValue(`${host}/${path}@${m.digest}`, "Copy pinned image reference")), tableRow("Digest", copyValue(m.digest, "Copy digest")),
     tableRow("Media type", code(m.mediaType)), tableRow("Manifest size", size(m.size)));
   if (m.layers.length) props.push(tableRow("Layers size", size(layersTotal(m))));
+  if (m.created) props.push(tableRow("Created", el("span", { title: new Date(m.created).toLocaleString(), textContent: ago(createdMs(m) / 1000) })));
   props.push(tableRow("Tags", sharing.join(", ") || "none"));
   if (n.kind === "tag" && n.changed) props.push(tableRow("Changed", el("span", { title: new Date(n.changed * 1000).toLocaleString(), textContent: ago(n.changed) })));
   if (m.platform) props.push(tableRow("Platform", `${m.platform.os}/${m.platform.architecture}`));
@@ -946,11 +1058,11 @@ function platformSections(n, m) {
   const node = (p) => (n.kind === "tag" && n.plats ? n.plats.find((x) => x.digest === p.digest) : null);
   const row = (p) => el("tr", {}, el("td", {}, node(p) ? link(node(p), platName(p)) : platName(p)), el("td", {}, code(short(p.digest))), el("td", { textContent: size(p.size) }));
   const note = `+${atts} attestation${atts > 1 ? "s" : ""}, hidden from the list. Copy and delete handle them with the image.`;
-  return [...subTable("Platforms", ["Platform", "Digest", "Size"], real.map(row)), ...(atts ? [el("p", { className: "mut", textContent: note })] : [])];
+  return [...subTable("Platforms", ["Platform", "Digest", "Size"], real.map((p) => row(p))), ...(atts ? [el("p", { className: "mut", textContent: note })] : [])];
 }
-function manifestHeading(n, t, path) {
+function manifestHeading(n, t, path, kind) {
   const isTag = n.kind === "tag";
-  return el("h2", {}, el("span", { className: "ico" }, icon(isTag ? "whale" : "chip", isTag ? "whale" : "")), isTag ? `${path}:${n.tag}` : `${path}:${t.tag} ${n.name}`);
+  return el("h2", {}, el("span", { className: "ico" }, isTag ? kindIcon(kind) : icon("chip")), isTag ? `${path}:${n.tag}` : `${path}:${t.tag} ${n.name}`);
 }
 async function manifestPane(n, seq) {
   const t = n.kind === "tag" ? n : n.parent, path = t.parent.path;
@@ -959,8 +1071,8 @@ async function manifestPane(n, seq) {
   if (n.kind === "tag") await ensurePlats(n);
   if (seq !== paneSeq) return;
   const sharing = t.parent.tagList.filter((x) => x.digest === m.digest).map((x) => x.tag); // from the tag list the pane already holds
-  showMain(crumbs(n), manifestHeading(n, t, path), actions(path, ref, m.digest), el("table", { className: "props" }, ...manifestProps(n, m, path, sharing)),
-    ...(n.kind === "tag" ? [commandsEl(path, n.tag, m.digest)] : []), ...platformSections(n, m),
+  showMain(crumbs(n), manifestHeading(n, t, path, artifactKind(m)), actions(path, ref, m.digest), el("table", { className: "props" }, ...manifestProps(n, m, path, sharing)),
+    ...(n.kind === "tag" ? [commandsEl(path, n.tag, m.digest, artifactKind(m))] : []), ...platformSections(n, m),
     ...subTable("Layers", ["Digest", "Size"], m.layers.map((l) => el("tr", {}, el("td", {}, code(l.digest)), el("td", { textContent: size(l.size) })))));
 }
 
@@ -968,6 +1080,7 @@ function notFoundPane() {
   showMain(el("h2", { textContent: "Not found" }), el("p", { className: "mut" }, "That repository or tag is not in the registry. ", el("a", { href: "#/", textContent: "Back to the registry" })));
 }
 async function drawPane(n, seq) {
+  resetHidden();
   if (!n) return notFoundPane();
   if (n === RECENT) return recentPane();
   if (n.kind === "root") return rootPane(n);
@@ -1008,7 +1121,9 @@ async function resolve(r) {
   if (!n || !r.tag) return n;
   await ensureTags(n);
   let t = n.tagMap.get(r.tag);
-  if (!t && !(n.missing?.get(r.tag) > Date.now() - 30000)) { // a link to a tag that is not there is checked once, then remembered for 30 s
+  const missedAt = n.missing?.get(r.tag);
+  const recentlyMissing = missedAt !== undefined && missedAt > Date.now() - 30000;
+  if (!t && !recentlyMissing) { // a link to a tag that is not there is checked once, then remembered for 30 s
     await ensureTags(n, true);
     t = n.tagMap.get(r.tag);
     if (!t) {
@@ -1107,7 +1222,10 @@ function startLive() {
     state = "connecting";
     es = new EventSource("/api/events");
     es.onopen = () => { state = "live"; liveLabel(); };
-    es.onmessage = () => { if (document.hidden) stale = true; else syncSoon(); };
+    es.onmessage = () => {
+      if (document.hidden) stale = true;
+      else syncSoon();
+    };
     es.onerror = () => { state = "connecting"; liveLabel(); }; // the browser reconnects by itself
   }
   liveLabel();
@@ -1145,6 +1263,28 @@ function sourceCard(o, copyDigest) {
     el("div", { className: "srcmeta mut" }, digest, ...(platforms ? [el("span", { textContent: platforms })] : []), ...(sizeText ? [el("span", { textContent: sizeText })] : [])));
 }
 
+// The same delete as a call to this UI's own API, for a script. The repository and digest are checked first, so nothing odd is put in the command.
+// It is the UI's origin on purpose: the call keeps every guard of the button. The registry's own DELETE is not shown.
+function deleteScript(repo, digest, children) {
+  const origin = location.origin;
+  if (origin === "null" || repoError(repo) || !DIGEST_REF.test(digest)) return null;
+  const body = `{"repo":"${repo}","digest":"${digest}"${children ? ',"children":true' : ""}}`;
+  return [`TOKEN=$(curl -s "${origin}/api/config" | jq -r .csrf)`,
+    `curl -X POST "${origin}/api/delete" -H "Origin: ${origin}" -H "X-CSRF-Token: $TOKEN" -H 'Content-Type: application/json' -d '${body}'`];
+}
+function scriptSection(o, children) { // children: a function that says whether the platform images switch is on
+  const holder = el("div");
+  const draw = () => {
+    const lines = deleteScript(o.repo, o.digest, children());
+    holder.replaceChildren(...(lines ? [codeBlock("Delete from a script", lines)] : []));
+  };
+  draw();
+  const box = el("details", { className: "script" }, el("summary", { textContent: "Delete from a script" }),
+    el("p", { className: "mut", textContent: "The call keeps the same guards as the button: the CSRF token, read-only mode and the refusal to delete a child of an index. With an auth override in front of the UI it needs credentials too." }), holder);
+  box.redraw = draw;
+  return box;
+}
+
 // Delete: says what goes and what does not. o: {repo, ref, digest, m (a fresh manifest, with its tags), block, info (the /api/parents answer)}.
 // Resolves to {children} or null.
 function confirmDelete(o) {
@@ -1153,22 +1293,28 @@ function confirmDelete(o) {
     const m = o.m, isIndex = !!m.index, removable = o.info ? o.info.removable : 0;
     const others = tree.names.filter((p) => p !== o.repo);
     const example = others.find((p) => p.split("/")[0] !== o.repo.split("/")[0]) || others[0];
+    const suchAs = example ? ", such as " + example : "";
     const sw = el("button", { type: "button", role: "switch", className: "switch", "aria-labelledby": "d-sw", "aria-checked": "false", disabled: !removable,
-      onclick: () => { children = !children; sw.setAttribute("aria-checked", String(children)); } });
+      onclick: () => { children = !children; sw.setAttribute("aria-checked", String(children)); script.redraw(); } });
+    const script = scriptSection(o, () => children);
     const go = el("button", { type: "button", className: "primary dangerfill", textContent: "Delete", disabled: !!o.block });
-    go.onclick = () => { if (go.disabled) return; result = { children }; dlg.close(); };
+    go.onclick = () => {
+      if (go.disabled) return;
+      result = { children };
+      dlg.close();
+    };
     const dlg = el("dialog", { className: "settings transfer", "aria-labelledby": "d-title" },
       el("div", { className: "shead" }, el("h2", { id: "d-title", textContent: "Delete manifest" }),
         el("button", { type: "button", className: "iconbtn", "aria-label": "Close", onclick: () => dlg.close() }, icon("close"))),
       el("div", { className: "sbody" },
         sourceCard(o, true),
         ...(o.block ? [el("p", { className: "dlg-warn", role: "alert", textContent: o.block })] : []),
-        el("p", { className: "scope", textContent: `Deletes this manifest from ${o.repo} only. Other repositories${example ? `, such as ${example}` : ""}, are not affected, even if they hold the same image.` }),
+        el("p", { className: "scope", textContent: `Deletes this manifest from ${o.repo} only. Other repositories${suchAs}, are not affected, even if they hold the same image.` }),
         el("div", { className: "xlabel", textContent: "Tags removed with it" }),
         el("div", { className: "tagchips" }, ...(m.tags.length ? m.tags.map((t) => el("span", { className: "tagchip", textContent: t })) : [el("span", { className: "mut", textContent: "none, this digest has no tag" })])),
         ...(isIndex ? [el("div", { className: "srow" }, el("div", {}, el("div", { className: "slabel", id: "d-sw", textContent: "Also delete platform images" }),
           el("div", { className: "sdesc", textContent: removable ? `Index children that no other tag in this repository uses. ${removable} of ${o.info.children} would be removed.` : "Every child is used by another tag in this repository, so none would be removed." })), el("div", { className: "sctl" }, sw))] : []),
-        el("p", { className: "mut", textContent: "Disk space is freed by garbage collection, not by this action." })),
+        el("p", { className: "mut", textContent: "Disk space is freed by garbage collection, not by this action." }), script),
       el("div", { className: "sfoot" }, el("button", { type: "button", textContent: "Cancel", onclick: () => dlg.close() }), go));
     dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
     dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
@@ -1188,11 +1334,11 @@ function createPicker(st, onChoose) {
     const walk = (n, depth, anc, last) => {
       out.push({ n, depth, anc, last });
       if (!open.has(n.id)) return;
-      const k = folderKids(n);
+      const k = visibleKids(n);
       const below = depth === 0 ? [] : [...anc, !last];
       k.forEach((c, i) => walk(c, depth + 1, below, i === k.length - 1));
     };
-    const top = folderKids(tree.root);
+    const top = visibleKids(tree.root);
     top.forEach((n, i) => walk(n, 0, [], i === top.length - 1));
     return out;
   };
@@ -1211,7 +1357,7 @@ function createPicker(st, onChoose) {
     const rows = flat(), ids = rows.map((r) => r.n.id);
     const sel = tree.byPath.get(st.path);
     if (!ids.includes(focusId)) focusId = ids.includes(sel?.id) ? sel.id : ids[0];
-    box.replaceChildren(...rows.map(rowFor));
+    box.replaceChildren(...rows.map((r) => rowFor(r)));
     if (hadFocus) $("px-" + focusId)?.focus();
   };
   const reveal = (path) => { // open every existing folder above the longest existing prefix of path
@@ -1230,7 +1376,11 @@ function createPicker(st, onChoose) {
   };
   const nodeOf = (target) => { const r = target.closest(".row[data-id]"); return r && tree.byId.get(r.dataset.id); };
   const setOpen = (n, value) => {
-    if (value) open.add(n.id); else open.delete(n.id);
+    if (value) {
+      open.add(n.id);
+    } else {
+      open.delete(n.id);
+    }
     focusId = n.id;
     draw();
   };
@@ -1353,7 +1503,11 @@ function transfer(o) {
     pickerSync = update;
     pathIn.oninput = () => { st.path = pathIn.value.trim(); update(); };
     tagIn.oninput = () => { st.tag = tagIn.value.trim(); update(); };
-    const confirm = () => { if (go.disabled) return; result = { dst: st.path, dstRef: st.tag }; dlg.close(); };
+    const confirm = () => {
+      if (go.disabled) return;
+      result = { dst: st.path, dstRef: st.tag };
+      dlg.close();
+    };
     go.onclick = confirm;
     for (const i of [pathIn, tagIn]) i.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); confirm(); } });
     const lead = transferLead(o);
@@ -1402,6 +1556,9 @@ function gcSection() {
         el("li", {}, "Collect.", codeBlock("Collect", [gcCommand(tool, storage, false)])),
         el("li", { textContent: "Start the registry again." })),
       el("p", { className: "mut", textContent: "Never add --delete-untagged: it deletes the child manifests of multi-arch images and breaks them." }),
+      el("p", { className: "slabel", textContent: "Remove an empty repository (registry stopped)" }),
+      el("p", { className: "mut", textContent: "The registry API cannot delete a repository, and garbage collection leaves its empty directory behind. With the registry stopped, remove the directory yourself:" }),
+      codeBlock("Remove an empty repository", [rmRepoCommand("<repo>")]),
       ...(cfg.registryStorage ? [] : [el("p", { className: "hint", textContent: "UI_REGISTRY_STORAGE is not set, so the command has the placeholder <registry-storage>. Replace it with the host path or volume name of the registry data, or set UI_REGISTRY_STORAGE." })]));
   };
   draw();
@@ -1428,7 +1585,7 @@ function helpPanel() {
 }
 
 // ---- Settings: one panel, changes apply as you make them ----------------------------------------------------------------
-const SETTING_KEYS = ["theme", "runtime", "sort", "live", "interval", "pageSize"];
+const SETTING_KEYS = ["theme", "runtime", "sort", "live", "interval", "pageSize", "showEmpty"];
 function segmented(labelId, options, key, apply) { // options: [value, text, iconName?]. Arrow keys move and select, like radio buttons.
   const box = el("div", { className: "seg", role: "radiogroup", "aria-labelledby": labelId });
   const draw = () => box.replaceChildren(...options.map(([v, text, ico]) => el("button", {
@@ -1472,7 +1629,8 @@ function applyPrefs(change) { // save a change and do what it needs, at once
   if (prefs.theme !== before.theme) applyTheme();
   if (prefs.live !== before.live) startLive();
   if (prefs.interval !== before.interval) startPoll();
-  if (prefs.runtime !== before.runtime || prefs.sort !== before.sort || prefs.pageSize !== before.pageSize) { resetShown(); void renderPane(true); }
+  if (prefs.showEmpty !== before.showEmpty) { resetHidden(); renderTree(); }
+  if (prefs.runtime !== before.runtime || prefs.sort !== before.sort || prefs.pageSize !== before.pageSize || prefs.showEmpty !== before.showEmpty) { resetShown(); void renderPane(true); }
 }
 function settings() {
   const controls = [];
@@ -1497,7 +1655,8 @@ function settings() {
       section("Appearance", row("s-theme", "Theme", "System, light or dark.", segmented("s-theme", [["system", "System", "monitor"], ["light", "Light", "sun"], ["dark", "Dark", "moon"]], "theme", apply))),
       section("Commands", row("s-rt", "Command line tool", "Used in the copyable commands.", segmented("s-rt", [["podman", "podman"], ["docker", "docker"]], "runtime", apply))),
       section("Lists", row("s-sort", "Sort by", "Order of tags and folders in lists.", segmented("s-sort", [["recent", "Recent"], ["name", "Name"]], "sort", apply)),
-        row("s-rows", "Rows per page", "Rows a list shows before Show more.", selectEl("s-rows", "pageSize", CHOICES.pageSize, String, apply))),
+        row("s-rows", "Rows per page", "Rows a list shows before Show more.", selectEl("s-rows", "pageSize", CHOICES.pageSize, String, apply)),
+        row("s-empty", "Show empty repositories", "Repositories with no tags. The registry cannot delete them.", switchEl("s-empty", "showEmpty", apply))),
       section("Lifecycle", lifecycleRow()),
       section("Live updates", row("s-live", "Auto-refresh", "Update the tree and lists as the registry changes.", switchEl("s-live", "live", apply)), pollRow)),
     el("div", { className: "sfoot" },

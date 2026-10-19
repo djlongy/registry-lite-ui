@@ -85,7 +85,7 @@ input::placeholder { color:var(--mut); }
 .chev { flex:none; width:16px; height:16px; margin:0 2px; display:inline-flex; color:var(--mut); }
 .row[aria-expanded=true] .chev svg { transform:rotate(90deg); }
 .i { width:16px; height:16px; flex:none; fill:currentColor; margin-right:var(--s2); color:var(--ico); }
-.i.whale { color:var(--whale); }
+.i.whale { color:var(--whale); } .i.chart { color:var(--acc); }
 .i .s { fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; }
 .i .cut { fill:var(--panel); }
 .row[aria-selected=true] .i .cut { fill:var(--acc-soft); }
@@ -124,6 +124,7 @@ tr:hover > td { background:var(--hover); }
 .tabs button:hover { background:none; color:var(--fg); }
 .tabs button[aria-selected=true] { color:var(--acc); border-bottom-color:var(--acc); font-weight:600; }
 .tabs button:focus-visible { outline-offset:-2px; border-radius:var(--r1); }
+.seg[hidden] { display:none; }
 .seg { display:inline-flex; border:1px solid var(--line2); border-radius:var(--r1); overflow:hidden; margin-bottom:var(--s2); }
 .seg button { height:26px; border:0; border-radius:0; font-size:12.5px; background:none; }
 .seg button + button { border-left:1px solid var(--line2); }
@@ -194,13 +195,16 @@ dialog.settings.transfer { width:560px; }
 .xchips { margin-top:var(--s1); }
 .xchips .xlabel { margin:var(--s3) 0 var(--s1); }
 .chips { display:flex; flex-wrap:wrap; gap:var(--s2); }
-.chip { height:26px; border-radius:13px; font-size:12.5px; padding:0 var(--s3); }
-.chip { display:inline-flex; align-items:center; gap:var(--s1); }
+.chip { display:inline-flex; align-items:center; gap:var(--s1); height:26px; border-radius:13px; font-size:12.5px; padding:0 var(--s3); }
 .chip.empty { border-style:dashed; }
 .chip:disabled { opacity:.5; cursor:default; }
 .stages { font-size:12.5px; text-align:right; }
 .chip[aria-pressed=true] { background:var(--acc-soft); color:var(--acc); border-color:var(--acc); font-weight:600; }
 .preview { display:flex; align-items:center; gap:var(--s3); margin-top:var(--s3); padding:var(--s2) var(--s3); border-radius:var(--r1); background:var(--bg); min-height:36px; }
+
+.script { margin-top:var(--s3); border-top:1px solid var(--line); padding-top:var(--s2); }
+.script summary { cursor:pointer; font-weight:600; padding:var(--s1) 0; }
+.script .code { max-width:100%; }
 
 /* Row copy icons and Help */
 .vh { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
