@@ -6,14 +6,20 @@ on:
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 env:
   IMAGE: ghcr.io/djlongy/registry-lite-ui
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: python3 -m unittest discover -s tests -p 'unit_test.py' -v
+      - name: Simulate a checkout made under umask 077
+        run: chmod -R go-rwx app
       - name: Build amd64 and arm64 with buildah
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
@@ -49,6 +55,7 @@ jobs:
           retention-days: 1
 
   publish:
+    timeout-minutes: 15
     if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-24.04

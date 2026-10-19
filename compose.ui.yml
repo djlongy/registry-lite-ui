@@ -1,0 +1,45 @@
+# The UI alone, for a registry that already runs as its own service. Set in .env or the environment:
+#   REGISTRY_URL     required, for example https://registry.example.internal:5000
+#   REGISTRY_CA_FILE path inside the container of the CA the UI trusts, for example /certs/ca.crt
+#   UI_TLS_CERT      path inside the container of the UI certificate, for example /certs/tls.crt
+#   UI_TLS_KEY       path inside the container of a key copy readable by uid 65534, for example /keys/ui.key
+#   CERTS_DIR, KEYS_DIR  host directories mounted at /certs and /keys (default /data/certs and /data/keys)
+# `z` relabels with a shared SELinux label, so another service mounting the same directory keeps access.
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 10m, max-file: "3"}
+
+services:
+  ui:
+    image: ${UI_IMAGE:-ghcr.io/djlongy/registry-lite-ui:latest}
+    ports: ["${UI_BIND:-127.0.0.1}:${UI_PORT:-8080}:8080"]
+    environment:
+      REGISTRY_URL: ${REGISTRY_URL:?set REGISTRY_URL}
+      REGISTRY_CA_FILE: "${REGISTRY_CA_FILE:-}"
+      UI_TLS_CERT: "${UI_TLS_CERT:-}"
+      UI_TLS_KEY: "${UI_TLS_KEY:-}"
+      UI_ALLOWED_HOSTS: "${UI_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}"
+      UI_READONLY: "${UI_READONLY:-false}"
+      UI_POLL_INTERVAL: "${UI_POLL_INTERVAL:-30}"
+      UI_STATE_DIR: /state
+      UI_MAX_EVENTS: "${UI_MAX_EVENTS:-1000}"
+    volumes:
+      - ui-state:/state
+      - ${CERTS_DIR:-/data/certs}:/certs:ro,z
+      - ${KEYS_DIR:-/data/keys}:/keys:ro,z
+    logging: *logging
+    mem_limit: 128m
+    pids_limit: 128
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, ssl, urllib.request as u; u.urlopen(('https' if os.environ.get('UI_TLS_CERT') else 'http') + '://127.0.0.1:8080/healthz', timeout=2, context=ssl._create_unverified_context())"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+volumes:
+  ui-state:

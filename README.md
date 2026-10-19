@@ -38,6 +38,8 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 
 `docker compose up -d --build`, open `http://localhost:8080`, and keep pushing and pulling against `registry.example.internal:5000` as before.
 
+For a registry that already runs as its own service, start the UI alone: `REGISTRY_URL=https://registry.example.internal:5000 podman compose -f compose.ui.yml up -d` (podman-compose 1.2 or newer, or `docker compose`). See [UI only](#ui-only).
+
 ## Image
 
 | | |
@@ -55,6 +57,20 @@ podman build --format docker -f Containerfile -t registry-lite-ui .   # or: dock
 
 `--format docker` keeps the `HEALTHCHECK`, which the OCI format drops. CI builds with `buildah` (no docker daemon) for both platforms, runs the unit tests and a podman smoke test, then pushes the manifest list. `.gitlab-ci.yml` does the same with rootless buildah on an unprivileged GitLab runner and pushes to `$CI_REGISTRY_IMAGE`.
 
+## UI only
+
+`compose.ui.yml` runs the `ui` service with the same limits, logging and hardening as `compose.yml`, and a `ui-state` volume. `REGISTRY_URL` is required. For HTTPS set `REGISTRY_CA_FILE`, `UI_TLS_CERT` and `UI_TLS_KEY` to paths inside the container. Host directories mount read-only at `/certs` and `/keys`, from `CERTS_DIR` and `KEYS_DIR` (default `/data/certs` and `/data/keys`).
+
+```sh
+export REGISTRY_URL=https://registry.example.internal:5000 REGISTRY_CA_FILE=/certs/ca.crt UI_TLS_CERT=/certs/tls.crt UI_TLS_KEY=/keys/ui.key
+podman compose -f compose.ui.yml up -d
+```
+
+- The mounts use `:ro,z` (shared SELinux label). `:Z` gives the directory a label private to this container, and the registry service that mounts `/data/certs` too would lose access.
+- The UI runs as uid 65534 and needs a readable copy of the key. Rootful: `install -m 0440 -g 65534 /data/keys/registry.key /data/keys/ui.key`. Rootless: uid 65534 in the container is a sub-uid on the host, so create the copy with `install -m 0400 /path/registry.key /data/keys/ui.key && podman unshare chown 65534:65534 /data/keys/ui.key`.
+- To start at boot, `podman-compose -f compose.ui.yml systemd -a create-unit`, then `systemctl --user enable --now podman-compose@registry-lite-ui`. Quadlet works too, see [Podman](#podman).
+- To pin the image, set `UI_IMAGE=ghcr.io/djlongy/registry-lite-ui@sha256:<digest>`.
+
 ## Components
 
 | File | What it is |
@@ -66,6 +82,7 @@ podman build --format docker -f Containerfile -t registry-lite-ui .   # or: dock
 | `app/static/` | Vanilla HTML, CSS and JS with no build step. Data is rendered with `textContent`, never `innerHTML`, and the theme is a class set by same-origin JS under a strict CSP. |
 | `Containerfile` | `ubi9/python-312-minimal` pinned by digest, uid 65534, no pip installs. |
 | `.github/workflows/build.yml`, `.gitlab-ci.yml` | Build the image with buildah, test it, and publish it to ghcr.io or the GitLab registry. |
+| `compose.ui.yml` | The UI alone, for a registry that runs as its own service. |
 | `compose.basic.yml`, `compose.oidc.yml`, `compose.ldap.yml` | Optional auth in front of the UI only, using stock `nginx-unprivileged`, `oauth2-proxy` and `dex`. |
 | `compose.tls.yml`, `compose.basic-tls.yml`, `compose.oidc-tls.yml` | Optional HTTPS from an existing certificate, for the registry, the UI or the auth proxy. `server_context` in `app/server.py` sets up the TLS 1.2+ listener. |
 
@@ -170,7 +187,7 @@ docker compose -f compose.yml -f compose.tls.yml up -d
 
 ## Podman
 
-The compose file runs under `podman-compose` (`!reset` in the auth overrides needs 1.2 or newer). For a systemd service on a VM, either `podman-compose systemd -a create-unit` and `systemctl --user enable --now podman-compose@registry-lite-ui`, or write Quadlet `.container` files for `registry` (`PublishPort=5000:5000`, `Volume=registry-data:/var/lib/registry`, `Environment=REGISTRY_STORAGE_DELETE_ENABLED=true`) and `ui` (`Image` built from `Dockerfile`, `PublishPort=8080:8080`, `Environment=REGISTRY_URL=http://registry:5000`, `ReadOnly=true`, `DropCapability=ALL`, `Network` shared with the registry).
+The compose file runs under `podman-compose` (`!reset` in the auth overrides needs 1.2 or newer). For a systemd service on a VM, either `podman-compose systemd -a create-unit` and `systemctl --user enable --now podman-compose@registry-lite-ui`, or write Quadlet `.container` files for `registry` (`PublishPort=5000:5000`, `Volume=registry-data:/var/lib/registry`, `Environment=REGISTRY_STORAGE_DELETE_ENABLED=true`) and `ui` (`Image` built from `Containerfile`, `PublishPort=8080:8080`, `Environment=REGISTRY_URL=http://registry:5000`, `ReadOnly=true`, `DropCapability=ALL`, `Network` shared with the registry).
 
 ## Operations
 

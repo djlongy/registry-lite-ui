@@ -3,7 +3,8 @@ FROM registry.access.redhat.com/ubi9/python-312-minimal@sha256:8d9955078019f8165
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY app /app
 USER 0
-RUN mkdir /state && chown 65534:65534 /state
+# files must be readable by uid 65534 whatever umask the build host checked them out with
+RUN chmod -R a=rX /app && mkdir /state && chown 65534:65534 /state
 USER 65534:65534
 LABEL org.opencontainers.image.source=https://github.com/djlongy/registry-lite-ui
 EXPOSE 8080
