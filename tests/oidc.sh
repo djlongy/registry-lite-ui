@@ -16,4 +16,4 @@ final=$(curl "${R[@]}" -c "$JAR" -b "$JAR" -L -o /dev/null -w '%{url_effective}'
 echo "after login:          $final"
 echo "with session, API:    $(curl "${R[@]}" -b "$JAR" -o /dev/null -w '%{http_code}' localhost:8088/api/repos)"
 echo "wrong password:       $(curl "${R[@]}" -c "$JAR.2" -b "$JAR.2" -L -o /dev/null -w '%{http_code}' --data-urlencode login=admin@example.internal --data-urlencode password=bad "$login")"
-echo "UI published directly: $(docker compose -f compose.yml -f compose.oidc.yml port ui 8080 2>&1 | head -1)"
+echo "UI published directly: $(docker compose -f compose.yml -f compose.oidc.yml port registry-lite-ui 8080 2>&1 | head -1)"

@@ -1,6 +1,6 @@
 # The UI authenticates to a registry that has its own basic auth. Put the password in ./secrets/registry_password.
 services:
-  ui:
+  registry-lite-ui:
     environment:
       REGISTRY_USER: ${REGISTRY_USER:?set REGISTRY_USER}
       REGISTRY_PASSWORD_FILE: /run/secrets/registry_password

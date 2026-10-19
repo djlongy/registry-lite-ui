@@ -5,12 +5,8 @@
 #   UI_TLS_KEY       path inside the container of a key copy readable by uid 65534, for example /keys/ui.key
 #   CERTS_DIR, KEYS_DIR  host directories mounted at /certs and /keys (default /data/certs and /data/keys)
 # `z` relabels with a shared SELinux label, so another service mounting the same directory keeps access.
-x-logging: &logging
-  driver: json-file
-  options: {max-size: 10m, max-file: "3"}
-
 services:
-  ui:
+  registry-lite-ui:
     image: ${UI_IMAGE:-ghcr.io/djlongy/registry-lite-ui:latest}
     ports: ["${UI_BIND:-127.0.0.1}:${UI_PORT:-8080}:8080"]
     environment:
@@ -28,7 +24,6 @@ services:
       - ui-state:/state
       - ${CERTS_DIR:-/data/certs}:/certs:ro,z
       - ${KEYS_DIR:-/data/keys}:/keys:ro,z
-    logging: *logging
     mem_limit: 128m
     pids_limit: 128
     cpus: 0.5

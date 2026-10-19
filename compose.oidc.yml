@@ -1,10 +1,6 @@
 # OIDC in front of the UI with oauth2-proxy. Set the OAUTH2_PROXY_* values in .env, see README.
-x-logging: &logging
-  driver: json-file
-  options: {max-size: 10m, max-file: "3"}
-
 services:
-  ui:
+  registry-lite-ui:
     ports: !reset []
     environment:
       UI_ALLOWED_HOSTS: "${UI_ALLOWED_HOSTS:?set UI_ALLOWED_HOSTS to the host name users type in the browser}"
@@ -13,7 +9,7 @@ services:
     ports: ["${UI_PORT:-8080}:4180"]
     environment:
       OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
-      OAUTH2_PROXY_UPSTREAMS: http://ui:8080
+      OAUTH2_PROXY_UPSTREAMS: http://registry-lite-ui:8080
       OAUTH2_PROXY_PROVIDER: oidc
       OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?set OIDC_ISSUER_URL}
       OAUTH2_PROXY_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
@@ -26,11 +22,10 @@ services:
       OAUTH2_PROXY_COOKIE_SAMESITE: lax
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
-    logging: *logging
     mem_limit: 128m
     pids_limit: 64
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    depends_on: [ui]
+    depends_on: [registry-lite-ui]
     restart: unless-stopped

@@ -17,7 +17,7 @@ docker compose up -d --build   # builds the UI image from the Containerfile; pla
 
 ## Config
 
-Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.py`.
+Set on the `registry-lite-ui` service in `compose.yml`. The parser is `Config` in `app/server.py`.
 
 | Req | Name | Default | Purpose |
 |---|---|---|---|
@@ -80,7 +80,7 @@ podman build --format docker -f Containerfile -t registry-lite-ui .   # or: dock
 
 ## UI only
 
-`compose.ui.yml` runs the `ui` service with the same limits, logging and hardening as `compose.yml`, and a `ui-state` volume. `REGISTRY_URL` is required and must be reachable from inside the container: for a registry on the same host use its DNS name and published port, not `localhost`. For HTTPS set `REGISTRY_CA_FILE`, `UI_TLS_CERT` and `UI_TLS_KEY` to paths inside the container. Host directories mount read-only at `/certs` and `/keys`, from `CERTS_DIR` and `KEYS_DIR` (default `/data/certs` and `/data/keys`).
+`compose.ui.yml` runs the `registry-lite-ui` service with the same limits and hardening as `compose.yml`, and a `ui-state` volume. `REGISTRY_URL` is required and must be reachable from inside the container: for a registry on the same host use its DNS name and published port, not `localhost`. For HTTPS set `REGISTRY_CA_FILE`, `UI_TLS_CERT` and `UI_TLS_KEY` to paths inside the container. Host directories mount read-only at `/certs` and `/keys`, from `CERTS_DIR` and `KEYS_DIR` (default `/data/certs` and `/data/keys`).
 
 ```sh
 export REGISTRY_URL=https://registry.example.internal:5000 REGISTRY_CA_FILE=/certs/ca.crt UI_TLS_CERT=/certs/tls.crt UI_TLS_KEY=/keys/ui.key
@@ -115,7 +115,7 @@ WantedBy=multi-user.target
 
 | File | What it is |
 |---|---|
-| `compose.yml` | `registry:2` published on 5000 exactly as before, plus the UI on 8080, plus two GC jobs behind `profiles: [gc]`. |
+| `compose.yml` | `registry:2` published on 5000 exactly as before, plus the UI on 8080. |
 | `app/registry.py` | A 200-line stdlib client for the registry HTTP API with name validation and the copy, move and delete logic. It never touches registry storage. |
 | `app/server.py` | A `http.server` app that serves four static files, a JSON API and a Server-Sent Events stream, with CSRF checks, connection caps and logging to stdout. |
 | `app/poller.py` | A thread that polls the registry's own API for tag and digest changes and keeps a capped event history in memory, optionally in one JSON file. It never talks to anything but the registry. |
@@ -163,10 +163,12 @@ Deleting a manifest does not free disk. Blobs are freed by `registry garbage-col
 
 ```sh
 docker compose stop registry
-docker compose --profile gc run --rm gc-dry   # lists blobs that would be deleted
-docker compose --profile gc run --rm gc       # deletes them
+podman run --rm -v <registry volume>:/var/lib/registry registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 \
+  registry garbage-collect /etc/docker/registry/config.yml   # add --dry-run to list what would be deleted
 docker compose start registry
 ```
+
+`<registry volume>` is the `registry-data` volume of the compose project (`docker volume ls`), or the path the registry mounts at `/var/lib/registry`. `docker run` takes the same arguments.
 
 Do not add `--delete-untagged`. In registry 2.8 it deletes the child manifests of multi-arch images, and the index then fails to pull (reproduced in this repo's test run). The registry API cannot list untagged manifests, so the UI cannot sweep them. It deletes children together with an index instead, which leaves nothing untagged behind. A manifest orphaned by pushing over a tag stays until you remove it by digest. A systemd timer for the job:
 
@@ -176,8 +178,8 @@ Do not add `--delete-untagged`. In registry 2.8 it deletes the child manifests o
 Type=oneshot
 WorkingDirectory=/opt/registry-lite-ui
 ExecStartPre=/usr/bin/podman-compose stop registry
-ExecStart=/usr/bin/podman-compose --profile gc run --rm gc
-ExecStopPost=/usr/bin/podman-compose start registry   # runs even when gc fails
+ExecStart=/usr/bin/podman run --rm -v <registry volume>:/var/lib/registry registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 registry garbage-collect /etc/docker/registry/config.yml
+ExecStopPost=/usr/bin/podman-compose start registry   # runs even when GC fails
 ```
 
 Empty repositories stay in the catalog until their directory is removed from the volume. That is a `registry:2` behaviour.
@@ -219,7 +221,7 @@ install -m 0440 -g 65534 /etc/pki/registry/tls.key /etc/pki/registry/ui.key   # 
 docker compose -f compose.yml -f compose.tls.yml up -d
 ```
 
-- The registry (root in its image) reads `TLS_KEY` itself and stays on 5000. If it already has `REGISTRY_HTTP_TLS_CERTIFICATE` and `REGISTRY_HTTP_TLS_KEY` of its own, remove that block from the file and keep the `ui` part.
+- The registry (root in its image) reads `TLS_KEY` itself and stays on 5000. If it already has `REGISTRY_HTTP_TLS_CERTIFICATE` and `REGISTRY_HTTP_TLS_KEY` of its own, remove that block from the file and keep the `registry-lite-ui` part.
 - With an auth TLS override the proxy, not the UI, serves the certificate: set `PROXY_TLS_KEY` to a separate copy of the key that the proxy's group can read (nginx-unprivileged is uid 101, check oauth2-proxy with `docker image inspect`), for example `install -m 0440 -g 101 /etc/pki/registry/tls.key /etc/pki/registry/proxy.key`. `UI_TLS_KEY` is then not used. Group ids belong to whatever host account carries them, so other host services in that group can read the copy; compose `secrets:` with a per-service uid and mode avoid that, and are not wired here.
 - The UI runs as uid 65534 and cannot read a root-only key. Give it a copy with group 65534 and mode 0440 (`UI_TLS_KEY`), or a podman secret created with `--uid 65534 --mode 0440`. The host key keeps its mode.
 - `registry` gets a network alias `REGISTRY_HOST`, so the UI reaches it by the certificate name inside the compose network.
@@ -228,14 +230,14 @@ docker compose -f compose.yml -f compose.tls.yml up -d
 
 ## Podman
 
-The compose file runs under `podman-compose` (`!reset` in the auth overrides needs 1.2 or newer). For a systemd service on a VM, either `podman-compose systemd -a create-unit` and `systemctl --user enable --now podman-compose@registry-lite-ui`, or write Quadlet `.container` files for `registry` (`PublishPort=5000:5000`, `Volume=registry-data:/var/lib/registry`, `Environment=REGISTRY_STORAGE_DELETE_ENABLED=true`) and `ui` (`Image` built from `Containerfile`, `PublishPort=8080:8080`, `Environment=REGISTRY_URL=http://registry:5000`, `ReadOnly=true`, `DropCapability=ALL`, `Network` shared with the registry).
+The compose file runs under `podman-compose` (`!reset` in the auth overrides needs 1.2 or newer). For a systemd service on a VM, either `podman-compose systemd -a create-unit` and `systemctl --user enable --now podman-compose@registry-lite-ui`, or write Quadlet `.container` files for `registry` (`PublishPort=5000:5000`, `Volume=registry-data:/var/lib/registry`, `Environment=REGISTRY_STORAGE_DELETE_ENABLED=true`) and `registry-lite-ui` (`Image` built from `Containerfile`, `PublishPort=8080:8080`, `Environment=REGISTRY_URL=http://registry:5000`, `ReadOnly=true`, `DropCapability=ALL`, `Network` shared with the registry).
 
 ## Operations
 
 Built to run unattended for years without a restart.
 
-- **Logs.** Everything goes to stdout and stderr: `docker compose logs -f ui`, `podman logs -f ui`. One line per request (method, path without query, status), no bodies, headers or cookies. A repeating error logs once, then at most every 10 minutes with a count, and once more when it recovers. Poller cycles, health checks and SSE heartbeats are silent. `LOG_LEVEL=debug` adds them.
-- **Rotation.** Every service in `compose.yml` and the overrides uses `json-file` with `max-size: 10m`, `max-file: "3"`. podman-compose takes the same `logging.options`, or `podman run --log-opt max-size=10m`. In Quadlet use `LogDriver=journald` (limits come from `SystemMaxUse` in `journald.conf`) or `LogOpt=max-size=10m`.
+- **Logs.** Everything goes to stdout and stderr: `docker compose logs -f registry-lite-ui`, `podman logs -f registry-lite-ui`. One line per request (method, path without query, status), no bodies, headers or cookies. A repeating error logs once, then at most every 10 minutes with a count, and once more when it recovers. Poller cycles, health checks and SSE heartbeats are silent. `LOG_LEVEL=debug` adds them.
+- **Rotation.** The app writes to stdout only, so the host rotates it. Docker: set `log-opts` `max-size` and `max-file` in `/etc/docker/daemon.json`. Podman: the default journald driver is rotated by journald (`SystemMaxUse`), or set `log_size_max` in `containers.conf`.
 - **Limits.** The UI has `mem_limit: 128m`, `pids_limit: 128`, `cpus: 0.5`, a read-only root filesystem and no tmpfs. The registry runs with all capabilities dropped except `DAC_READ_SEARCH` (so it can read a TLS key owned by another user) and `no-new-privileges`. The proxies have 64 to 128 MiB and a 16 MiB `/tmp`.
 - **State.** The only file written is `/state/state.json` on the `ui-state` volume: at most `UI_MAX_EVENTS` events no older than `UI_MAX_EVENT_DAYS`, plus one entry per tag in the registry. It is written to a temporary file and renamed, only when it changed, at most every 30 s and once on SIGTERM. Nothing else is cached.
 - **Connections.** At most `UI_MAX_CONN` connections and `UI_MAX_SSE` live clients, 15 s per socket operation, 10 s for the whole request header, 10 s for a POST body and 10 s to write a response (a reaper closes slower clients), 30 s on every call to the registry. A registry response is read up to 8 MiB, a list follows at most 1000 pages and never the same page twice. Blobs are never held in memory: a refused mount streams the blob in 8 KiB blocks.

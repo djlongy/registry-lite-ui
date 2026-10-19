@@ -1,6 +1,6 @@
 # Use after compose.tls.yml and compose.oidc.yml. oauth2-proxy serves HTTPS with the same certificate, the UI behind it is plain HTTP.
 services:
-  ui:
+  registry-lite-ui:
     environment:
       UI_TLS_CERT: ""
       UI_TLS_KEY: ""

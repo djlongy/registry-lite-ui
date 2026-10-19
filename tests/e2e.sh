@@ -108,7 +108,7 @@ recent() {
   curl -fsS ${UI_CURL_ARGS:-} "$UI/api/recent" | jq -e '.events[0].seq > .events[1].seq' >/dev/null && ok "events are newest first" || bad "event order"
   if [ -n "${RESTART_UI:-}" ]; then
     local n; n=$(curl -fsS ${UI_CURL_ARGS:-} "$UI/api/recent" | jq '.events | length')
-    docker compose restart ui >/dev/null 2>&1; for i in $(seq 20); do curl -fs ${UI_CURL_ARGS:-} "$UI/healthz" >/dev/null && break; sleep 1; done
+    docker compose restart registry-lite-ui >/dev/null 2>&1; for i in $(seq 20); do curl -fs ${UI_CURL_ARGS:-} "$UI/healthz" >/dev/null && break; sleep 1; done
     curl -fsS ${UI_CURL_ARGS:-} "$UI/api/recent" | jq -e --argjson n "$n" '.persistent and (.events | length) == $n' >/dev/null && ok "history survives a UI restart ($n events)" || bad "history lost on restart"
   fi
 }
@@ -124,8 +124,9 @@ gc() {
   d="sha256:$(raw scratch/big:gc)"
   post /api/delete "{\"repo\":\"scratch/big\",\"digest\":\"$d\",\"children\":true}" | jq -e '.deleted | length > 1' >/dev/null && ok "UI delete scratch/big with its children"
   docker compose stop registry >/dev/null 2>&1
-  docker compose --profile gc run --rm gc-dry 2>&1 | tail -n 3
-  docker compose --profile gc run --rm gc 2>&1 | tail -n 2
+  gcrun() { docker run --rm -v rlui_registry-data:/var/lib/registry registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 registry garbage-collect "$@" /etc/docker/registry/config.yml 2>&1; }
+  gcrun --dry-run | tail -n 3
+  gcrun | tail -n 2
   docker compose start registry >/dev/null 2>&1
   for _ in $(seq 20); do curl -fs "http://$REG/v2/" >/dev/null && break; sleep 1; done
   after=$(size)

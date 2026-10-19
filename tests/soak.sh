@@ -33,12 +33,12 @@ echo "# time_s rss pids state_bytes events seq tags log_bytes_last_5min restarts
 t0=$(date +%s)
 while [ "$(date +%s)" -lt "$end" ]; do
   sleep 30
-  st=$(docker stats --no-stream --format '{{.MemUsage}} {{.PIDs}}' rlui-ui-1 2>/dev/null)
-  size=$(docker exec rlui-ui-1 stat -c %s /state/state.json 2>/dev/null || echo 0)
+  st=$(docker stats --no-stream --format '{{.MemUsage}} {{.PIDs}}' rlui-registry-lite-ui-1 2>/dev/null)
+  size=$(docker exec rlui-registry-lite-ui-1 stat -c %s /state/state.json 2>/dev/null || echo 0)
   rec=$(curl -s "$UI/api/recent?limit=1000" | jq -r '"\(.events | length) \(.seq) \(.tags)"' 2>/dev/null || echo "- - -")
-  logb=$(docker logs --since 5m rlui-ui-1 2>&1 | wc -c)
-  echo "$(( $(date +%s) - t0 )) ${st%% /*} ${st##* } $size $rec $logb $(docker inspect -f '{{.RestartCount}}' rlui-ui-1)"
+  logb=$(docker logs --since 5m rlui-registry-lite-ui-1 2>&1 | wc -c)
+  echo "$(( $(date +%s) - t0 )) ${st%% /*} ${st##* } $size $rec $logb $(docker inspect -f '{{.RestartCount}}' rlui-registry-lite-ui-1)"
 done
-echo "# final: health=$(docker inspect -f '{{.State.Health.Status}}' rlui-ui-1) restarts=$(docker inspect -f '{{.RestartCount}}' rlui-ui-1) oom=$(docker inspect -f '{{.State.OOMKilled}}' rlui-ui-1)"
-echo "# log lines in the retained json-file: $(docker logs rlui-ui-1 2>&1 | wc -l), bytes: $(docker logs rlui-ui-1 2>&1 | wc -c)"
-echo "# distinct error lines:"; docker logs rlui-ui-1 2>&1 | grep -E 'WARNING|ERROR|recovered' | sed -E 's/^[0-9-]+ [0-9:,]+ //' | sort | uniq -c | sort -rn | head -8
+echo "# final: health=$(docker inspect -f '{{.State.Health.Status}}' rlui-registry-lite-ui-1) restarts=$(docker inspect -f '{{.RestartCount}}' rlui-registry-lite-ui-1) oom=$(docker inspect -f '{{.State.OOMKilled}}' rlui-registry-lite-ui-1)"
+echo "# log lines in the retained json-file: $(docker logs rlui-registry-lite-ui-1 2>&1 | wc -l), bytes: $(docker logs rlui-registry-lite-ui-1 2>&1 | wc -c)"
+echo "# distinct error lines:"; docker logs rlui-registry-lite-ui-1 2>&1 | grep -E 'WARNING|ERROR|recovered' | sed -E 's/^[0-9-]+ [0-9:,]+ //' | sort | uniq -c | sort -rn | head -8

@@ -1,8 +1,4 @@
 # registry:2 is published directly, exactly as before. The UI is a separate service that calls it.
-x-logging: &logging
-  driver: json-file
-  options: {max-size: 10m, max-file: "3"}
-
 services:
   registry:
     image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
@@ -10,13 +6,12 @@ services:
     environment:
       REGISTRY_STORAGE_DELETE_ENABLED: "true"
     volumes: [registry-data:/var/lib/registry]
-    logging: *logging
     cap_drop: [ALL]
     cap_add: [DAC_READ_SEARCH]  # reads a TLS key owned by another user; nothing else
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
 
-  ui:
+  registry-lite-ui:
     # `up -d` pulls this image, `up -d --build` builds Containerfile and tags it with the same name.
     image: ${UI_IMAGE:-ghcr.io/djlongy/registry-lite-ui:latest}
     build:
@@ -32,7 +27,6 @@ services:
       UI_STATE_DIR: /state
       UI_MAX_EVENTS: "${UI_MAX_EVENTS:-1000}"
     volumes: [ui-state:/state]
-    logging: *logging
     mem_limit: 128m
     pids_limit: 128
     cpus: 0.5
@@ -45,24 +39,6 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
-
-  # Garbage collection of blobs no manifest references. Stop the registry first, see README.
-  # Do not add --delete-untagged: in registry:2.8 it deletes the child manifests of multi-arch images.
-  gc:
-    profiles: [gc]
-    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
-    command: registry garbage-collect /etc/docker/registry/config.yml
-    volumes: [registry-data:/var/lib/registry]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-
-  gc-dry:
-    profiles: [gc]
-    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
-    command: registry garbage-collect --dry-run /etc/docker/registry/config.yml
-    volumes: [registry-data:/var/lib/registry:ro]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
 
 volumes:
   registry-data:

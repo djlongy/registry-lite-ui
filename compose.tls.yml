@@ -15,7 +15,7 @@ services:
     networks:
       default:
         aliases: ["${REGISTRY_HOST:?set REGISTRY_HOST}"]
-  ui:
+  registry-lite-ui:
     environment:
       REGISTRY_URL: https://${REGISTRY_HOST}:5000
       REGISTRY_CA_FILE: /certs/tls.crt
