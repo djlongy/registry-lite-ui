@@ -33,7 +33,10 @@ function el(tag, props, ...kids) {
   return n;
 }
 const short = (d) => (d || "").slice(0, 19);
-const size = (n) => (n == null ? "" : n < 1048576 ? (n / 1024).toFixed(1) + " KiB" : (n / 1048576).toFixed(1) + " MiB");
+function size(n) {
+  if (n == null) return "";
+  return n < 1048576 ? (n / 1024).toFixed(1) + " KiB" : (n / 1048576).toFixed(1) + " MiB";
+}
 const code = (t) => el("code", { textContent: t });
 function ago(t) {
   if (!t) return "";
@@ -62,16 +65,19 @@ function banner(text, err) {
 function ask(title, lines, fields, danger) {
   const form = $("form");
   form.replaceChildren(el("h3", { textContent: title }), ...lines.map((l) => el("p", { textContent: l })));
-  const input = (f) => f.type === "checkbox" ? el("input", { type: "checkbox", name: f.name, checked: f.value !== false })
-    : f.type === "select" ? el("select", { name: f.name }, ...f.options.map((o) => el("option", { value: String(o), textContent: String(o), selected: String(o) === String(f.value) })))
-    : el("input", { type: "text", name: f.name, value: f.value, required: true });
+  const option = (f) => (o) => el("option", { value: String(o), textContent: String(o), selected: String(o) === String(f.value) });
+  const input = (f) => {
+    if (f.type === "checkbox") return el("input", { type: "checkbox", name: f.name, checked: f.value !== false });
+    if (f.type === "select") return el("select", { name: f.name }, ...f.options.map(option(f)));
+    return el("input", { type: "text", name: f.name, value: f.value, required: true });
+  };
   fields.forEach((f) => form.append(el("label", {}, f.label + " ", input(f))));
   form.append(el("menu", {}, el("button", { textContent: "Cancel", value: "cancel" }), el("button", { textContent: "Confirm", value: "ok", className: danger ? "danger" : "" })));
   return new Promise((resolve) => {
     $("dlg").onclose = () => {
       const v = Object.fromEntries(fields.map((f) => [f.name, f.type === "checkbox" ? form[f.name].checked : form[f.name].value]));
       resolve($("dlg").returnValue === "ok" ? v : null);
-      route(); // anything skipped while the dialog was open
+      void route(); // anything skipped while the dialog was open
     };
     $("dlg").showModal();
   });
@@ -85,7 +91,7 @@ async function run(job, done) {
 function paged(rows, headers) {
   const n = shown || prefs.pageSize;
   const out = [el("table", {}, headers ? el("tr", {}, ...headers.map((h) => el("th", { textContent: h }))) : null, ...rows.slice(0, n))];
-  if (rows.length > n) out.push(el("p", {}, el("button", { textContent: `Show more (${rows.length - n} left)`, onclick: () => { shown = n + prefs.pageSize; route(); } })));
+  if (rows.length > n) out.push(el("p", {}, el("button", { textContent: `Show more (${rows.length - n} left)`, onclick: () => { shown = n + prefs.pageSize; void route(); } })));
   return out;
 }
 
@@ -151,13 +157,18 @@ async function manifest(repo, ref) {
     ...sub("Layers", ["Digest", "Size"], m.layers.map((l) => el("tr", {}, el("td", {}, code(l.digest)), el("td", { textContent: size(l.size) })))));
 }
 
+function notice() {
+  if (cfg.readonly) return "Read-only mode.";
+  return cfg.deleteEnabled ? "" : "Deletion is disabled on this registry (REGISTRY_STORAGE_DELETE_ENABLED is not true). Move and Delete will fail.";
+}
+
 async function route() {
   if ($("dlg").open) return; // never redraw under a dialog
   const h = decodeURIComponent(location.hash.slice(1)) || (prefs.view === "repos" ? "/repos" : "/recent");
   for (const [id, path] of [["n-recent", "/recent"], ["n-repos", "/repos"]]) $(id).className = h === path ? "on" : "";
   try {
     recent = await api("/api/recent");
-    banner(cfg.readonly ? "Read-only mode." : cfg.deleteEnabled ? "" : "Deletion is disabled on this registry (REGISTRY_STORAGE_DELETE_ENABLED is not true). Move and Delete will fail.");
+    banner(notice());
     if (h.startsWith("/m/")) { const [r, ref] = h.slice(3).split("@"); await manifest(r, ref); }
     else if (h.startsWith("/r/")) await tags(h.slice(3));
     else if (h === "/repos") await repos();
@@ -173,7 +184,8 @@ let es = null;
 let state = "off";
 function liveLabel() {
   const t = updated ? ` updated ${updated.toLocaleTimeString()}` : "";
-  $("live").textContent = (state === "live" ? "live" : state === "off" ? "auto-refresh off" : "reconnecting") + t;
+  const label = { live: "live", off: "auto-refresh off" }[state] || "reconnecting";
+  $("live").textContent = label + t;
 }
 function startLive() {
   if (es) es.close();
@@ -183,7 +195,7 @@ function startLive() {
     state = "connecting";
     es = new EventSource("/api/events");
     es.onopen = () => { state = "live"; liveLabel(); };
-    es.onmessage = () => { if (!document.hidden) route(); else stale = true; };
+    es.onmessage = () => { if (document.hidden) stale = true; else void route(); };
     es.onerror = () => { state = "connecting"; liveLabel(); }; // the browser reconnects by itself
   }
   liveLabel();
@@ -193,9 +205,9 @@ let lastSeq = 0;
 setInterval(async () => { // fallback and clock refresh, every `interval` seconds
   if (!prefs.live || document.hidden || $("dlg").open) return;
   if (state === "live") return;
-  try { const r = await api("/api/recent?limit=1"); if (r.seq !== lastSeq) { lastSeq = r.seq; route(); } } catch (e) { /* shown by the next route() */ }
+  try { const r = await api("/api/recent?limit=1"); if (r.seq !== lastSeq) { lastSeq = r.seq; void route(); } } catch (e) { /* shown by the next route() */ }
 }, 1000 * Math.max(5, prefs.interval));
-document.addEventListener("visibilitychange", () => { if (!document.hidden && stale) { stale = false; route(); } });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && stale) { stale = false; void route(); } });
 
 async function settings() {
   const v = await ask("Settings", ["Stored in this browser only. No data is stored."], [
@@ -207,14 +219,12 @@ async function settings() {
     { name: "pageSize", label: "Rows per page", type: "select", options: [25, 50, 100, 200], value: prefs.pageSize }]);
   if (!v) return;
   prefs = { ...v, live: v.live, interval: +v.interval, pageSize: +v.pageSize };
-  savePrefs(); applyTheme(); startLive(); shown = 0; route();
+  savePrefs(); applyTheme(); startLive(); shown = 0; void route();
 }
 
-(async () => {
-  loadPrefs(); applyTheme();
-  $("prefs").onclick = settings;
-  try { cfg = await api("/api/config"); $("reg").textContent = cfg.registry; } catch (e) { banner(e.message, true); }
-  addEventListener("hashchange", () => { shown = 0; route(); });
-  startLive();
-  route();
-})();
+loadPrefs(); applyTheme();
+$("prefs").onclick = () => void settings();
+try { cfg = await api("/api/config"); $("reg").textContent = cfg.registry; } catch (e) { banner(e.message, true); }
+addEventListener("hashchange", () => { shown = 0; void route(); });
+startLive();
+await route();

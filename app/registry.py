@@ -14,6 +14,7 @@ log = logging.getLogger("registry")
 # Patterns from the distribution spec. fullmatch is always used. re.ASCII keeps \w to [A-Za-z0-9_].
 REPO_PART_RE = re.compile(r"[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*")
 TAG_RE = re.compile(r"\w[\w.-]{0,127}", re.ASCII)
+SHA256 = "sha256:"
 DIGEST_RE = re.compile(r"sha256:[a-f0-9]{64}|sha512:[a-f0-9]{128}")
 
 MAX_BODY = 8 << 20  # largest registry response read into memory; blobs are streamed instead
@@ -140,8 +141,8 @@ class Client:
         if digest:
             check_digest(digest)
         if not head:
-            local = "sha256:" + hashlib.sha256(data).hexdigest()
-            if digest.startswith("sha256:") and digest != local or ref.startswith("sha256:") and ref != local:
+            local = SHA256 + hashlib.sha256(data).hexdigest()
+            if digest.startswith(SHA256) and digest != local or ref.startswith(SHA256) and ref != local:
                 raise RegistryError(502, "registry returned a manifest that does not match its digest")
             digest = digest or local
         return data, h.get("Content-Type", "").split(";")[0], digest

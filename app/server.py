@@ -24,6 +24,7 @@ log = logging.getLogger("ui")
 STATIC = Path(__file__).parent / "static"
 FILES = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"), "/style.css": ("style.css", "text/css")}
 MAX_BODY = 4096  # bytes of JSON accepted on a POST
+HEALTHZ = "/healthz"
 HEADER_SECS, BODY_SECS = 10, 10  # whole-request limits against clients that send a byte at a time
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 SECURITY_HEADERS = (("Content-Security-Policy", CSP), ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
@@ -112,7 +113,7 @@ class BoundedServer(ThreadingHTTPServer):
     def reap(self):
         while not self.closed.wait(1):
             now = time.monotonic()
-            for sock, t in list(self.deadlines.items()):
+            for sock, t in self.deadlines.copy().items():
                 if t < now:
                     try:
                         socket.socket.shutdown(sock, socket.SHUT_RDWR)  # not SSLSocket.shutdown, it is not thread safe
@@ -197,139 +198,141 @@ def host_only(host):
     return (name if port.isdigit() and name else host).lower()
 
 
+class Handler(BaseHTTPRequestHandler):
+    cfg = None  # set by make_handler
+    get = post = None
+    server_version = "registry-lite-ui"
+    sys_version = ""
+    timeout = 15  # per socket operation; HEADER_SECS and BODY_SECS bound the whole read
+
+    def setup(self):
+        super().setup()
+        self.server.deadline(self.request, HEADER_SECS)
+
+    def finish(self):
+        self.server.deadline(self.request)
+        super().finish()
+
+    def headers_out(self, pairs):
+        for k, v in (*pairs, *SECURITY_HEADERS):
+            self.send_header(k, v)
+        self.end_headers()
+
+    def send(self, status, body, ctype="application/json"):
+        self.send_response(status)
+        self.headers_out((("Content-Type", ctype), ("Content-Length", str(len(body)))))
+        self.wfile.write(body)
+
+    def reply(self, status, obj):
+        self.send(status, json.dumps(obj).encode())
+
+    def events(self):
+        """Server-Sent Events: a message with the new sequence number on each change, a comment every 15 s as heartbeat."""
+        if not self.cfg.sse_slots.acquire(blocking=False):
+            self.cfg.errors.error("sse", "live client limit reached, further clients get 503")
+            return self.reply(503, {"error": "too many live clients"})
+        try:
+            self.send_response(200)
+            self.headers_out((("Content-Type", "text/event-stream"), ("X-Accel-Buffering", "no")))
+            self.close_connection = True
+            self.log_request(200)
+            seq = self.cfg.state.seq
+            self.wfile.write(b"retry: 5000\n\n")
+            self.wfile.flush()
+            idle = 0
+            while not self.hung_up():
+                now = self.cfg.state.wait(seq, 1)
+                idle = idle + 1 if now == seq else 0
+                if idle in (0, 15):  # a change, or 15 quiet seconds: heartbeat
+                    self.wfile.write(b": hb\n\n" if now == seq else b"data: %d\n\n" % now)
+                    self.wfile.flush()
+                    idle = 0
+                seq = now
+        except OSError:
+            pass  # client went away
+        finally:
+            self.cfg.sse_slots.release()
+
+    def hung_up(self):
+        """A browser sends nothing after its request, so a readable socket means it has gone. Frees the slot at once."""
+        return bool(select.select([self.connection], [], [], 0)[0])
+
+    def read_json(self):
+        """The body of a POST: a plain Content-Length of at most MAX_BODY bytes, all read within BODY_SECS."""
+        n = self.headers.get("Content-Length", "")
+        if "Transfer-Encoding" in self.headers or not (n.isascii() and n.isdigit()):
+            raise R.RegistryError(411, "a plain Content-Length is required")
+        if int(n) > MAX_BODY:
+            raise R.RegistryError(413, "body too large")
+        self.server.deadline(self.request, BODY_SECS)
+        return json.loads(self.rfile.read(int(n)))
+
+    def mutate(self, handler):
+        if self.cfg.readonly:
+            return self.reply(403, {"error": "UI is read-only (UI_READONLY)"})
+        if not csrf_ok(self.cfg, self.headers):
+            return self.reply(403, {"error": "CSRF check failed"})
+        self.reply(200, handler(self.read_json()))
+
+    def health(self):  # never calls the registry
+        healthy = self.cfg.poller is None or self.cfg.poller.healthy()
+        self.send(200 if healthy else 503, b"ok" if healthy else b"poller stalled", "text/plain")
+
+    def dispatch(self, method, url):
+        if self.cfg.hosts and url.path != HEALTHZ and host_only(self.headers.get("Host", "")) not in self.cfg.hosts:
+            return self.reply(421, {"error": "host not allowed"})  # /healthz is the container's own probe
+        if method == "POST" and url.path in self.post:
+            return self.mutate(self.post[url.path])
+        if method != "GET" or url.path in self.post:
+            return self.reply(404, {"error": "not found"})
+        if url.path in FILES:
+            name, ctype = FILES[url.path]
+            return self.send(200, (STATIC / name).read_bytes(), ctype + "; charset=utf-8")
+        if url.path == HEALTHZ:
+            return self.health()
+        if url.path == "/api/events":
+            return self.events()
+        if url.path in self.get:
+            return self.reply(200, self.get[url.path](urllib.parse.parse_qs(url.query)))
+        self.reply(404, {"error": "not found"})
+
+    def handle_any(self, method):
+        if method == "GET":
+            self.server.deadline(self.request)  # the headers are in; a POST gets a fresh deadline for its body
+        try:
+            self.dispatch(method, urllib.parse.urlsplit(self.path))
+        except R.RegistryError as e:
+            if e.status >= 500:
+                self.cfg.errors.error("api", e.message)
+            self.reply(e.status if 400 <= e.status < 600 else 502, {"error": e.message})
+        except (KeyError, ValueError, TypeError):
+            self.reply(400, {"error": "bad request"})
+        except Exception as e:  # a bug must not drop the connection or leak a traceback
+            self.cfg.errors.error("api", f"unhandled {type(e).__name__} on {method}")
+            self.reply(500, {"error": "internal error"})
+
+    def do_GET(self):
+        self.handle_any("GET")
+
+    def do_POST(self):
+        self.handle_any("POST")
+
+    def do_other(self):
+        self.reply(405, {"error": "method not allowed"})
+
+    do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_other
+
+    def log_request(self, code="-", size="-"):  # one line per request: no query, headers, cookies or body
+        path = self.path.split("?")[0]
+        log.log(logging.DEBUG if path == HEALTHZ or (code == 503 and path == "/api/events") else logging.INFO, "%s %s %s", self.command, ascii(path)[1:-1], code)
+
+    def log_message(self, fmt, *args):
+        log.debug(fmt, *args)
+
+
 def make_handler(cfg):
     get, post = routes(cfg)
-
-    class Handler(BaseHTTPRequestHandler):
-        server_version = "registry-lite-ui"
-        sys_version = ""
-        timeout = 15  # per socket operation; HEADER_SECS and BODY_SECS bound the whole read
-
-        def setup(self):
-            super().setup()
-            self.server.deadline(self.request, HEADER_SECS)
-
-        def finish(self):
-            self.server.deadline(self.request)
-            super().finish()
-
-        def headers_out(self, pairs):
-            for k, v in (*pairs, *SECURITY_HEADERS):
-                self.send_header(k, v)
-            self.end_headers()
-
-        def send(self, status, body, ctype="application/json"):
-            self.send_response(status)
-            self.headers_out((("Content-Type", ctype), ("Content-Length", str(len(body)))))
-            self.wfile.write(body)
-
-        def reply(self, status, obj):
-            self.send(status, json.dumps(obj).encode())
-
-        def events(self):
-            """Server-Sent Events: a message with the new sequence number on each change, a comment every 15 s as heartbeat."""
-            if not cfg.sse_slots.acquire(blocking=False):
-                cfg.errors.error("sse", "live client limit reached, further clients get 503")
-                return self.reply(503, {"error": "too many live clients"})
-            try:
-                self.send_response(200)
-                self.headers_out((("Content-Type", "text/event-stream"), ("X-Accel-Buffering", "no")))
-                self.close_connection = True
-                self.log_request(200)
-                seq = cfg.state.seq
-                self.wfile.write(b"retry: 5000\n\n")
-                self.wfile.flush()
-                idle = 0
-                while not self.hung_up():
-                    now = cfg.state.wait(seq, 1)
-                    idle = idle + 1 if now == seq else 0
-                    if idle in (0, 15):  # a change, or 15 quiet seconds: heartbeat
-                        self.wfile.write(b": hb\n\n" if now == seq else b"data: %d\n\n" % now)
-                        self.wfile.flush()
-                        idle = 0
-                    seq = now
-            except OSError:
-                pass  # client went away
-            finally:
-                cfg.sse_slots.release()
-
-        def hung_up(self):
-            """A browser sends nothing after its request, so a readable socket means it has gone. Frees the slot at once."""
-            return bool(select.select([self.connection], [], [], 0)[0])
-
-        def read_json(self):
-            """The body of a POST: a plain Content-Length of at most MAX_BODY bytes, all read within BODY_SECS."""
-            n = self.headers.get("Content-Length", "")
-            if "Transfer-Encoding" in self.headers or not (n.isascii() and n.isdigit()):
-                raise R.RegistryError(411, "a plain Content-Length is required")
-            if int(n) > MAX_BODY:
-                raise R.RegistryError(413, "body too large")
-            self.server.deadline(self.request, BODY_SECS)
-            return json.loads(self.rfile.read(int(n)))
-
-        def mutate(self, handler):
-            if cfg.readonly:
-                return self.reply(403, {"error": "UI is read-only (UI_READONLY)"})
-            if not csrf_ok(cfg, self.headers):
-                return self.reply(403, {"error": "CSRF check failed"})
-            self.reply(200, handler(self.read_json()))
-
-        def health(self):  # never calls the registry
-            healthy = cfg.poller is None or cfg.poller.healthy()
-            self.send(200 if healthy else 503, b"ok" if healthy else b"poller stalled", "text/plain")
-
-        def dispatch(self, method, url):
-            if cfg.hosts and url.path != "/healthz" and host_only(self.headers.get("Host", "")) not in cfg.hosts:
-                return self.reply(421, {"error": "host not allowed"})  # /healthz is the container's own probe
-            if method == "POST" and url.path in post:
-                return self.mutate(post[url.path])
-            if method != "GET" or url.path in post:
-                return self.reply(404, {"error": "not found"})
-            if url.path in FILES:
-                name, ctype = FILES[url.path]
-                return self.send(200, (STATIC / name).read_bytes(), ctype + "; charset=utf-8")
-            if url.path == "/healthz":
-                return self.health()
-            if url.path == "/api/events":
-                return self.events()
-            if url.path in get:
-                return self.reply(200, get[url.path](urllib.parse.parse_qs(url.query)))
-            self.reply(404, {"error": "not found"})
-
-        def handle_any(self, method):
-            if method == "GET":
-                self.server.deadline(self.request)  # the headers are in; a POST gets a fresh deadline for its body
-            try:
-                self.dispatch(method, urllib.parse.urlsplit(self.path))
-            except R.RegistryError as e:
-                if e.status >= 500:
-                    cfg.errors.error("api", e.message)
-                self.reply(e.status if 400 <= e.status < 600 else 502, {"error": e.message})
-            except (KeyError, ValueError, TypeError):
-                self.reply(400, {"error": "bad request"})
-            except Exception as e:  # a bug must not drop the connection or leak a traceback
-                cfg.errors.error("api", f"unhandled {type(e).__name__} on {method}")
-                self.reply(500, {"error": "internal error"})
-
-        def do_GET(self):
-            self.handle_any("GET")
-
-        def do_POST(self):
-            self.handle_any("POST")
-
-        def do_other(self):
-            self.reply(405, {"error": "method not allowed"})
-
-        do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_other
-
-        def log_request(self, code="-", size="-"):  # one line per request: no query, headers, cookies or body
-            path = self.path.split("?")[0]
-            log.log(logging.DEBUG if path == "/healthz" or (code == 503 and path == "/api/events") else logging.INFO, "%s %s %s", self.command, ascii(path)[1:-1], code)
-
-        def log_message(self, fmt, *args):
-            log.debug(fmt, *args)
-
-    return Handler
+    return type("Handler", (Handler,), {"cfg": cfg, "get": get, "post": post})
 
 
 def watchdog(cfg, every=60):
