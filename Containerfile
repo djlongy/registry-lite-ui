@@ -1,5 +1,7 @@
-# registry.access.redhat.com/ubi9/python-312-minimal:latest (UBI 9.8, Python 3.12), multi-arch index digest
-FROM registry.access.redhat.com/ubi9/python-312-minimal@sha256:8d9955078019f81659230b378bf916da4cd63ccc82f7f88a40ab642730cb776f
+# registry.access.redhat.com/ubi9/python-312-minimal:9.8 (UBI 9.8, Python 3.12), multi-arch index digest
+# Pass --build-arg BASE_IMAGE=<internal mirror of the same digest> where that registry is not reachable.
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/python-312-minimal@sha256:8d9955078019f81659230b378bf916da4cd63ccc82f7f88a40ab642730cb776f
+FROM ${BASE_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY app /app
 USER 0
