@@ -12,4 +12,4 @@ services:
       OAUTH2_PROXY_TLS_KEY_FILE: /certs/tls.key
     volumes:
       - ${TLS_CERT}:/certs/tls.crt:ro
-      - ${UI_TLS_KEY}:/certs/tls.key:ro
+      - ${PROXY_TLS_KEY:?set PROXY_TLS_KEY, a copy of the key readable by the proxy group}:/certs/tls.key:ro

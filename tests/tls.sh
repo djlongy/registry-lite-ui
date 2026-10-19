@@ -17,7 +17,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=$H" \
   -addext "subjectAltName=DNS:$H,DNS:localhost,IP:127.0.0.1" -keyout "$WORK/tls.key" -out "$WORK/tls.crt" 2>/dev/null
 cp "$WORK/tls.key" "$WORK/ui.key"; chmod 600 "$WORK/tls.key"; chmod 644 "$WORK/ui.key"   # ui.key stands for the group-readable copy
 mkdir "$WORK/certs"; cp "$WORK/tls.crt" "$WORK/certs/ca.crt"
-export TLS_CERT=$WORK/tls.crt TLS_KEY=$WORK/tls.key UI_TLS_KEY=$WORK/ui.key REGISTRY_HOST=$H
+export TLS_CERT=$WORK/tls.crt TLS_KEY=$WORK/tls.key UI_TLS_KEY=$WORK/ui.key PROXY_TLS_KEY=$WORK/ui.key REGISTRY_HOST=$H
 C=(-f compose.yml -f compose.tls.yml)
 REG=localhost:$REGISTRY_PORT UIH=https://localhost:$UI_PORT
 echo "== registry and UI both on HTTPS, certificate used as the CA"
@@ -73,6 +73,9 @@ refused "proxy refuses plain HTTP" curl -fsS "http://localhost:$UI_PORT/api/repo
 echo "== rendered config for the OIDC TLS override (not started)"
 OIDC_EMAIL_DOMAINS=x OIDC_ISSUER_URL=x OIDC_CLIENT_ID=x OIDC_CLIENT_SECRET=x OIDC_COOKIE_SECRET=x OIDC_REDIRECT_URL=x \
   docker compose "${C[@]}" -f compose.oidc.yml -f compose.oidc-tls.yml config --quiet && ok "compose.oidc-tls.yml renders" || bad "oidc-tls config"
+
+OIDC_EMAIL_DOMAINS=x OIDC_ISSUER_URL=x OIDC_CLIENT_ID=x OIDC_CLIENT_SECRET=x OIDC_COOKIE_SECRET=x OIDC_REDIRECT_URL=x LDAP_BIND_PW=x DEX_TLS_KEY=$WORK/ui.key DEX_HOST=dex.example.internal \
+  docker compose -f compose.yml -f compose.oidc.yml -f compose.ldap.yml config --quiet && ok "compose.ldap.yml renders" || bad "ldap config"
 
 docker compose "${B[@]}" down -v >/dev/null 2>&1
 echo "failures: $fails"
