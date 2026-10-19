@@ -32,10 +32,11 @@ refused "skopeo push fails without the CA" skopeo copy --quiet --override-os lin
 skopeo copy --quiet --all --dest-cert-dir "$WORK/certs" docker://$SRC/busybox:latest docker://$REG/tls/busybox:m >/dev/null 2>&1 && ok "skopeo push multi-arch with --cert-dir" || bad "skopeo push multi-arch"
 skopeo copy --quiet --override-os linux --override-arch arm64 --dest-cert-dir "$WORK/certs" docker://$SRC/alpine:latest docker://$REG/tls/alpine:s >/dev/null 2>&1 && ok "skopeo push single-arch with --cert-dir" || bad "skopeo push single-arch"
 skopeo copy --quiet --all --src-cert-dir "$WORK/certs" docker://$REG/tls/busybox:m dir:"$WORK/pull" >/dev/null 2>&1 && ok "skopeo pull with --cert-dir" || bad "skopeo pull"
-# docker never verifies loopback registries, so use the certificate name and map it to the daemon host
+# docker never verifies registries that resolve to loopback, so map the certificate name to the daemon host's own address
 DREG=$H:$REGISTRY_PORT
 VM() { if [ -n "${COLIMA_PROFILE:-}" ]; then colima ssh -p "$COLIMA_PROFILE" -- "$@"; else "$@"; fi; }
-VM sudo sh -c "grep -q $H /etc/hosts || echo '127.0.0.1 $H' >> /etc/hosts"
+HOSTIP=$(VM hostname -I | awk '{print $1}')
+VM sudo sh -c "grep -v ' $H\$' /etc/hosts > /tmp/hosts.new; echo '$HOSTIP $H' >> /tmp/hosts.new; cat /tmp/hosts.new > /etc/hosts"
 VM sudo rm -rf /etc/docker/certs.d/$DREG
 docker pull -q $SRC/alpine:latest >/dev/null && docker tag $SRC/alpine:latest $DREG/tls/alpine:d
 out=$(docker push $DREG/tls/alpine:d 2>&1); [[ $out == *"x509"* ]] && ok "docker push fails verification before the CA is installed" || { bad "docker negative"; echo "  got: $out"; }
