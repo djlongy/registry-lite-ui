@@ -128,7 +128,9 @@ async function tags(repo) {
 
 function actions(repo, ref, digest, sharing) {
   const copy = (move) => async () => {
-    const v = await ask(move ? "Move image" : "Copy image", [`From ${repo}:${ref}`, move ? `The source digest is deleted after the copy is verified.${sharing.length > 1 ? " Every tag on it goes: " + sharing.join(", ") + "." : ""}` : "Blobs are mounted, so no data is uploaded."],
+    const shared = sharing.length > 1 ? ` Every tag on it goes: ${sharing.join(", ")}.` : "";
+    const note = move ? "The source digest is deleted after the copy is verified." + shared : "Blobs are mounted, so no data is uploaded.";
+    const v = await ask(move ? "Move image" : "Copy image", [`From ${repo}:${ref}`, note],
       [{ name: "dst", label: "Destination repository", value: repo }, { name: "dstRef", label: "Destination tag", value: ref }], move);
     if (v) await run(() => api(move ? "/api/move" : "/api/copy", { src: repo, srcRef: ref, dst: v.dst, dstRef: v.dstRef }), () => (location.hash = `#/m/${v.dst}@${v.dstRef}`));
   };
