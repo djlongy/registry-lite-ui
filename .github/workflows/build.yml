@@ -79,3 +79,10 @@ jobs:
           skopeo --override-os linux --override-arch arm64 copy "docker://$IMAGE:$GITHUB_SHA" dir:check
           grep -lq Healthcheck check/*
           skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | sha256sum
+      - name: Run the pushed image
+        run: |
+          podman run -d --name ui -p 8080:8080 --read-only -v ui-state:/state \
+            -e REGISTRY_URL=http://127.0.0.1:5000 -e UI_STATE_DIR=/state "$IMAGE:$GITHUB_SHA"
+          for i in $(seq 30); do curl -fs localhost:8080/healthz && break; sleep 1; done
+          curl -fs localhost:8080/healthz
+          podman image inspect "$IMAGE:$GITHUB_SHA" --format '{{.Digest}} {{.Architecture}}'
