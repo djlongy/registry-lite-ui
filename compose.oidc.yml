@@ -1,4 +1,8 @@
 # OIDC in front of the UI with oauth2-proxy. Set the OAUTH2_PROXY_* values in .env, see README.
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 10m, max-file: "3"}
+
 services:
   ui:
     ports: !reset []
@@ -18,6 +22,9 @@ services:
       OAUTH2_PROXY_COOKIE_SECURE: "${OIDC_COOKIE_SECURE:-true}"
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+    logging: *logging
+    mem_limit: 128m
+    pids_limit: 64
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

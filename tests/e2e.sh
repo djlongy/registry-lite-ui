@@ -77,6 +77,33 @@ ui() {
   curl -s ${UI_CURL_ARGS:-} -D - -o /dev/null "$UI/" | grep -qi "content-security-policy: default-src 'none'" && ok "CSP header set" || bad "CSP"
 }
 
+recent() {
+  echo "== Recent view and live stream (poll interval ${UI_POLL_INTERVAL:-30} s)"
+  local wait=$(( ${UI_POLL_INTERVAL:-30} * 3 + 5 )) i ev
+  for i in $(seq "$wait"); do curl -fsS ${UI_CURL_ARGS:-} "$UI/api/recent?limit=1" | jq -e .baselined >/dev/null && break; sleep 1; done
+  curl -sN --max-time "$wait" ${UI_CURL_ARGS:-} "$UI/api/events" > "$WORK/sse.txt" 2>/dev/null &
+  local sse=$!
+  sleep 1
+  seen() { curl -fsS ${UI_CURL_ARGS:-} "$UI/api/recent" | jq -e --arg t "$1" --arg r "$2" '.events | any(.type == $t and .ref == $r)' >/dev/null; }
+  waitfor() { for i in $(seq "$wait"); do seen "$1" "$2" && return 0; sleep 1; done; return 1; }
+  skopeo_push --override-os linux --override-arch arm64 docker://$SRC/alpine:latest docker://$REG/lib/alpine:rec-1
+  waitfor new lib/alpine:rec-1 && ok "pushed tag appears in Recent as new, within the poll window" || bad "new tag not in Recent"
+  skopeo_push --override-os linux --override-arch arm64 docker://$SRC/busybox:latest docker://$REG/lib/alpine:rec-1
+  waitfor retagged lib/alpine:rec-1 && ok "overwritten tag appears as retagged" || bad "retag not in Recent"
+  local d
+  d=$(raw lib/alpine:rec-1)
+  post /api/delete "{\"repo\":\"lib/alpine\",\"digest\":\"sha256:$d\"}" >/dev/null
+  waitfor deleted lib/alpine:rec-1 && ok "deleted tag appears as deleted" || bad "delete not in Recent"
+  wait "$sse" 2>/dev/null
+  [ "$(grep -c '^data: ' "$WORK/sse.txt")" -ge 3 ] && ok "SSE stream delivered $(grep -c '^data: ' "$WORK/sse.txt") change messages" || bad "SSE messages: $(grep -c '^data: ' "$WORK/sse.txt")"
+  curl -fsS ${UI_CURL_ARGS:-} "$UI/api/recent" | jq -e '.events[0].seq > .events[1].seq' >/dev/null && ok "events are newest first" || bad "event order"
+  if [ -n "${RESTART_UI:-}" ]; then
+    local n; n=$(curl -fsS ${UI_CURL_ARGS:-} "$UI/api/recent" | jq '.events | length')
+    docker compose restart ui >/dev/null 2>&1; for i in $(seq 20); do curl -fs ${UI_CURL_ARGS:-} "$UI/healthz" >/dev/null && break; sleep 1; done
+    curl -fsS ${UI_CURL_ARGS:-} "$UI/api/recent" | jq -e --argjson n "$n" '.persistent and (.events | length) == $n' >/dev/null && ok "history survives a UI restart ($n events)" || bad "history lost on restart"
+  fi
+}
+
 gc() {
   echo "== garbage collection"
   local before after d
@@ -103,7 +130,8 @@ case "${1:-all}" in
   clients) clients "${2:-ui}" ;;
   ui) ui ;;
   gc) gc ;;
-  all) clients up; ui; gc ;;
+  recent) recent ;;
+  all) clients up; ui; recent; gc ;;
 esac
 echo "failures: $fails"
 exit $((fails > 0))

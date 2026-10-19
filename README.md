@@ -6,7 +6,8 @@ A web UI for a plain `registry:2` that browses, copies, moves and deletes images
 docker compose up -d --build   # registry on :5000 (unchanged), UI on http://localhost:8080
 ```
 
-![catalog](docs/screenshots/catalog.png)
+![recent changes](docs/screenshots/recent.png)
+![recent changes, dark](docs/screenshots/recent-dark.png)
 
 ## Requirements
 
@@ -24,6 +25,11 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 | When registry has basic auth | `REGISTRY_USER`, `REGISTRY_PASSWORD_FILE` | empty | Credentials for the registry. Use the file form, `REGISTRY_PASSWORD` also works. |
 | When registry is HTTPS | `REGISTRY_CA_FILE` | system store | CA bundle, or the self-signed certificate itself, that the UI trusts for `REGISTRY_URL`. Verification stays on. |
 | When UI serves HTTPS | `UI_TLS_CERT`, `UI_TLS_KEY` | empty | Certificate and key files for the UI's own listener (TLS 1.2 or newer). Both or neither. |
+| Optional | `UI_POLL_INTERVAL`, `UI_POLL_MAX_TAGS` | `30`, `500` | Seconds between registry walks, and tags checked per walk (the walk resumes where it stopped). |
+| Optional | `UI_STATE_DIR` | `/state` in compose | Directory for the one `state.json` history file. Unset means memory only. |
+| Optional | `UI_MAX_EVENTS`, `UI_MAX_EVENT_DAYS` | `1000`, `30` | History caps, by count and by age. |
+| Optional | `UI_MAX_CONN`, `UI_MAX_SSE` | `64`, `20` | Concurrent connections and live-update clients. Extra clients get 503. |
+| Optional | `LOG_LEVEL` | `info` | Python logging level. Logs go to stdout and stderr only. |
 | Optional | `UI_READONLY` | `false` | Hides and refuses copy, move and delete. |
 | Optional | `UI_ALLOWED_HOSTS` | any | Comma separated `Host` allowlist, a DNS rebinding guard. |
 | Optional | `UI_PORT` / `REGISTRY_PORT` | `8080` / `5000` | Host ports in `compose.yml`. |
@@ -38,8 +44,9 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 |---|---|
 | `compose.yml` | `registry:2` published on 5000 exactly as before, plus the UI on 8080, plus two GC jobs behind `profiles: [gc]`. |
 | `app/registry.py` | A 200-line stdlib client for the registry HTTP API with name validation and the copy, move and delete logic. It never touches registry storage. |
-| `app/server.py` | A 140-line `http.server` app that serves three static files and a JSON API, and checks CSRF. |
-| `app/static/` | About 150 lines of vanilla HTML, CSS and JS with no build step. Data is rendered with `textContent`, never `innerHTML`. |
+| `app/server.py` | A `http.server` app that serves three static files, a JSON API and a Server-Sent Events stream, with CSRF checks, connection caps and logging to stdout. |
+| `app/poller.py` | A thread that polls the registry's own API for tag and digest changes and keeps a capped event history in memory, optionally in one JSON file. It never talks to anything but the registry. |
+| `app/static/` | Vanilla HTML, CSS and JS with no build step. Data is rendered with `textContent`, never `innerHTML`, and the theme is a class set by same-origin JS under a strict CSP. |
 | `Dockerfile` | `python:3.13-slim` pinned by digest, uid 65534, no pip installs. |
 | `compose.basic.yml`, `compose.oidc.yml`, `compose.ldap.yml` | Optional auth in front of the UI only, using stock `nginx-unprivileged`, `oauth2-proxy` and `dex`. |
 | `compose.tls.yml`, `compose.basic-tls.yml`, `compose.oidc-tls.yml` | Optional HTTPS from an existing certificate, for the registry, the UI or the auth proxy. `server_context` in `app/server.py` sets up the TLS 1.2+ listener. |
@@ -54,6 +61,8 @@ Most registry UIs (joxit/docker-registry-ui behind nginx, and similar) proxy `/v
 
 | Feature | Registry API |
 |---|---|
+| Recent changes | The poller walks `GET /v2/_catalog` and tag lists (`HEAD` on each manifest for its digest) and records new, retagged and deleted tags with the time it saw them. The registry API has no push timestamps and the image config `created` is build time, so Recent shows when the UI saw a change, not when it was pushed or built. Pushes made before the UI started watching are not in the history. |
+| Live view | `GET /api/events` is a Server-Sent Events stream with a heartbeat every 15 s. The page refreshes on each change, pauses while a dialog is open or the tab is hidden, and falls back to polling `/api/recent` when the stream is down. |
 | Catalog, tags | `GET /v2/_catalog`, `GET /v2/<name>/tags/list` (follows `Link` pages) |
 | Manifest detail | `GET /v2/<name>/manifests/<ref>`, config blob for os and arch. Shows digest, size, layers, platforms of an index. |
 | Copy | For an index, each child manifest first. Per image, `POST /v2/<dst>/blobs/uploads/?mount=<digest>&from=<src>` for config and layers, then `PUT /v2/<dst>/manifests/<tag>` with the original bytes, so the digest is unchanged. If a mount is refused the blob is streamed instead. |
@@ -61,9 +70,16 @@ Most registry UIs (joxit/docker-registry-ui behind nginx, and similar) proxy `/v
 | Delete | `DELETE /v2/<name>/manifests/<digest>`. `registry:2` cannot delete a tag, so every tag on that digest goes, and the dialog lists them. A checkbox also deletes index children no other tag uses. |
 | Delete disabled | Detected with a `DELETE` of a digest that cannot exist (405 means disabled). The UI shows a banner and the action reports the setting to change. |
 
+![tags](docs/screenshots/tags.png)
 ![manifest](docs/screenshots/manifest.png)
 ![copy](docs/screenshots/copy-dialog.png)
 ![delete](docs/screenshots/delete-confirm.png)
+![delete, dark](docs/screenshots/delete-confirm-dark.png)
+![settings, dark](docs/screenshots/settings-dark.png)
+
+Settings (theme light, dark or system, landing page, sort order, auto-refresh, page size) are kept in the browser's `localStorage` and nothing else is stored there. The page works with storage blocked.
+
+Registry notifications were evaluated and left out. They would give exact push times, but the registry holds events for a down endpoint in an unbounded in-memory queue (`notifications/sinks.go`, v2.8.3). With the endpoint refusing connections, 50000 pushes got slower (3.7 ms to 7.6 ms each) and the registry used 220 MiB more memory than the same run without notifications (`tests/evidence/notifications.txt`, `tests/notify_probe.py`). It never blocked a push, but the UI being down must not cost the registry anything, so the poller is the only source.
 
 ## Garbage collection
 
@@ -137,6 +153,18 @@ docker compose -f compose.yml -f compose.tls.yml up -d
 
 The compose file runs under `podman-compose` (`!reset` in the auth overrides needs 1.2 or newer). For a systemd service on a VM, either `podman-compose systemd -a create-unit` and `systemctl --user enable --now podman-compose@registry-lite-ui`, or write Quadlet `.container` files for `registry` (`PublishPort=5000:5000`, `Volume=registry-data:/var/lib/registry`, `Environment=REGISTRY_STORAGE_DELETE_ENABLED=true`) and `ui` (`Image` built from `Dockerfile`, `PublishPort=8080:8080`, `Environment=REGISTRY_URL=http://registry:5000`, `ReadOnly=true`, `DropCapability=ALL`, `Network` shared with the registry).
 
+## Operations
+
+Built to run unattended for years without a restart.
+
+- **Logs.** Everything goes to stdout and stderr: `docker compose logs -f ui`, `podman logs -f ui`. One line per request (method, path without query, status), no bodies, headers or cookies. A repeating error logs once, then at most every 10 minutes with a count, and once more when it recovers. Poller cycles, health checks and SSE heartbeats are silent. `LOG_LEVEL=debug` adds them.
+- **Rotation.** Every service in `compose.yml` and the overrides uses `json-file` with `max-size: 10m`, `max-file: "3"`. podman-compose takes the same `logging.options`, or `podman run --log-opt max-size=10m`. In Quadlet use `LogDriver=journald` (limits come from `SystemMaxUse` in `journald.conf`) or `LogOpt=max-size=10m`.
+- **Limits.** The UI has `mem_limit: 128m`, `pids_limit: 64`, `cpus: 0.5`, a read-only root filesystem and no tmpfs. The proxies have 64 to 128 MiB and a 16 MiB `/tmp`.
+- **State.** The only file written is `/state/state.json` on the `ui-state` volume: at most `UI_MAX_EVENTS` events no older than `UI_MAX_EVENT_DAYS`, plus one entry per tag in the registry. It is written to a temporary file and renamed, only when it changed, at most every 30 s and once on SIGTERM. Nothing else is cached.
+- **Connections.** At most `UI_MAX_CONN` connections and `UI_MAX_SSE` live clients, 15 s per socket operation, 30 s on every call to the registry. Blobs are never held in memory: a refused mount streams the blob in 8 KiB blocks.
+- **Self-healing.** The poller and the request threads catch every exception, back off up to 5 minutes while the registry is down, and resume by themselves. `/healthz` never calls the registry and returns 503 if the poller has stalled. `restart: unless-stopped` is the backstop.
+- **Soak test.** `tests/soak.sh` ran 25 minutes at a 1 s poll interval with `UI_MAX_EVENTS=500`, about 3 tag changes per second (2446 recorded), 5 registry outages of 20 s and about 4 SSE connects per second. RSS stayed between 20.6 and 23.9 MiB (one 35 MiB sample, limit 128 MiB) with 0 restarts. `state.json` stopped growing at 136 KB with the event count held at 500. Logs ran at about 150 KB per 5 minutes (roughly 1.8 MB an hour, under that artificial load, rotation caps it at 30 MB). The 5 outages produced 5 error lines, 1 repeat reminder and 5 recovery lines. The numbers are in `tests/evidence/soak.txt`.
+
 ## Security notes
 
 - **Threat model.** A user or page that can reach the UI port. The registry has no auth by default, so the UI adds no new privilege to someone who can already reach port 5000. Use an auth override when the UI port is reachable by people who cannot reach the registry.
@@ -149,4 +177,4 @@ The compose file runs under `podman-compose` (`!reset` in the auth overrides nee
 
 ## Tests
 
-`python3 -m unittest discover -s tests -p 'unit_test.py'` covers names, copy ordering and CSRF. `tests/e2e.sh` runs the compose checks and `tests/oidc.sh` the dex login, `tests/tls.sh` the throwaway-certificate checks. Output from the last runs is in `tests/evidence/`: push and pull with the UI up and down, copy, move, delete, GC (a 19 MiB volume reduction), basic auth, registry auth and OIDC. The LDAP override, the OIDC TLS override (config renders only) and the stream fallback for refused blob mounts have no live test.
+`python3 -m unittest discover -s tests -p 'unit_test.py'` covers names, copy ordering and CSRF. `tests/e2e.sh` runs the compose checks and `tests/oidc.sh` the dex login, `tests/soak.sh` the long-run check, `tests/tls.sh` the throwaway-certificate checks. Output from the last runs is in `tests/evidence/`: push and pull with the UI up and down, copy, move, delete, GC (a 19 MiB volume reduction), basic auth, registry auth and OIDC. The LDAP override, the OIDC TLS override (config renders only) and the stream fallback for refused blob mounts have no live test.

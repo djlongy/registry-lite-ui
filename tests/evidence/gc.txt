@@ -1,12 +1,12 @@
 == garbage collection
 PASS docker push scratch image
 PASS UI delete scratch/big with its children
-blob eligible for deletion: sha256:8f08167922ac44d5fd363eb6d7f6e5d90da9bf50d91cc1d3e092b30643688303
-blob eligible for deletion: sha256:aa1d7f67ee91484d678814c8438afc34a1f8fdb4fb82e4abc43c2181daeff6e7
-blob eligible for deletion: sha256:e8d1ab7670bda8b06f333ae07038292203400ccff1d3aa0a246ad06bfb898d15
-time="2026-10-19T00:02:35.785527085Z" level=info msg="Deleting blob: /docker/registry/v2/blobs/sha256/e8/e8d1ab7670bda8b06f333ae07038292203400ccff1d3aa0a246ad06bfb898d15" go.version=go1.20.8 instance.id=fa8d44d5-c849-4a31-925b-4ce25871392b service=registry 
-time="2026-10-19T00:02:35.785582334Z" level=info msg="Deleting blob: /docker/registry/v2/blobs/sha256/1c/1c801b367335adb796ff53f653726e896a70d98cc8c48bb858dd3e804ba4e566" go.version=go1.20.8 instance.id=fa8d44d5-c849-4a31-925b-4ce25871392b service=registry 
-volume KiB before=69312 after=49680
+blob eligible for deletion: sha256:7dfe266a3a3e8eaad0302269ec1b048adc20b3b8c10c42b2ddab5d4d766b1f76
+blob eligible for deletion: sha256:8f0bd775f5410e71110e48d2ff46b8a9daf4804af2ff73b0b22c439ab8c408a6
+blob eligible for deletion: sha256:a85fedc08bf11a1109d99abf15d207fbb2a86c5f02521c1f3ed9aa72895dbe80
+time="2026-10-19T04:34:30.440421721Z" level=info msg="Deleting blob: /docker/registry/v2/blobs/sha256/5f/5fdc987ec782590eb9f94e127cd79e86239fedd67baf08fcb00aa21dccc6d875" go.version=go1.20.8 instance.id=07f1a1b4-ca15-47b4-9671-ed1d218bdbc8 service=registry 
+blob eligible for deletion: sha256:5fdc987ec782590eb9f94e127cd79e86239fedd67baf08fcb00aa21dccc6d875
+volume KiB before=69332 after=49700
 PASS GC shrank the volume
 PASS full pull after GC: lib/busybox:up-multi
 PASS full pull after GC: lib/busybox:down-multi

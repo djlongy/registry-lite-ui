@@ -1,4 +1,8 @@
 # registry:2 is published directly, exactly as before. The UI is a separate service that calls it.
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 10m, max-file: "3"}
+
 services:
   registry:
     image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
@@ -6,6 +10,7 @@ services:
     environment:
       REGISTRY_STORAGE_DELETE_ENABLED: "true"
     volumes: [registry-data:/var/lib/registry]
+    logging: *logging
     restart: unless-stopped
 
   ui:
@@ -14,6 +19,19 @@ services:
     environment:
       REGISTRY_URL: http://registry:5000
       UI_READONLY: "${UI_READONLY:-false}"
+      UI_POLL_INTERVAL: "${UI_POLL_INTERVAL:-30}"
+      UI_STATE_DIR: /state
+      UI_MAX_EVENTS: "${UI_MAX_EVENTS:-1000}"
+    volumes: [ui-state:/state]
+    logging: *logging
+    mem_limit: 128m
+    pids_limit: 64
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, ssl, urllib.request as u; u.urlopen(('https' if os.environ.get('UI_TLS_CERT') else 'http') + '://127.0.0.1:8080/healthz', timeout=2, context=ssl._create_unverified_context())"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -35,3 +53,4 @@ services:
 
 volumes:
   registry-data:
+  ui-state:

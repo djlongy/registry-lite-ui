@@ -157,12 +157,12 @@ def copy_blob(c, src, dst, digest):
     session = local_path(h["Location"])
     c.call("DELETE", session, ok=(204,))
     _, h, _ = c.call("POST", f"/v2/{dst}/blobs/uploads/", ok=(202,))
-    with c.open("GET", f"/v2/{src}/blobs/{digest}", timeout=3600) as r:
+    with c.open("GET", f"/v2/{src}/blobs/{digest}", timeout=300) as r:
         if r.status != 200:
             raise RegistryError(r.status, f"cannot read blob {digest[:19]}")
         sep = "&" if "?" in h["Location"] else "?"
         c.call("PUT", local_path(h["Location"]) + f"{sep}digest={digest}",
-               {"Content-Type": "application/octet-stream", "Content-Length": r.headers["Content-Length"]}, r, ok=(201,))
+               {"Content-Type": "application/octet-stream", "Content-Length": r.headers["Content-Length"]}, r, ok=(201,))  # r is read in 8 KiB blocks
 
 
 def copy(c, src, src_ref, dst, dst_ref):

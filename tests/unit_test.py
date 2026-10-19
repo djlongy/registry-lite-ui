@@ -9,6 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
+import poller as P  # noqa: E402
 import registry as R  # noqa: E402
 import server as S  # noqa: E402
 
@@ -144,6 +145,200 @@ class Tls(unittest.TestCase):
         with self.assertRaises(R.RegistryError) as e:
             R.Client(f"https://localhost:{port}", cafile=cert).call("GET", "/v2/x")
         self.assertIn("subjectAltName", e.exception.message)
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class Diff(unittest.TestCase):
+    def test_new_retagged_deleted_unchanged(self):
+        old = {"a:1": "d1", "a:2": "d2", "a:3": "d3"}
+        new = {"a:1": "d1", "a:2": "dX", "a:4": "d4"}
+        got = {(e["type"], e["ref"]) for e in P.diff(old, new, 5)}
+        self.assertEqual(got, {("retagged", "a:2"), ("new", "a:4"), ("deleted", "a:3")})
+
+    def test_retag_keeps_previous_digest(self):
+        (e,) = P.diff({"a:1": "d1"}, {"a:1": "d2"}, 5)
+        self.assertEqual((e["prev"], e["digest"]), ("d1", "d2"))
+
+
+class StateTests(unittest.TestCase):
+    def state(self, **kw):
+        return P.State(clock=kw.pop("clock", Clock()), **kw)
+
+    def test_no_events_before_baseline(self):
+        s = self.state()
+        s.update({"a"}, {"a:1": "d1"})
+        self.assertEqual(len(s.events), 0)
+        s.mark_baselined()
+        s.update({"a"}, {"a:1": "d2", "a:2": "d3"})
+        self.assertEqual(sorted(e["type"] for e in s.events), ["new", "retagged"])
+
+    def test_partial_scan_does_not_delete_other_repos(self):
+        s = self.state()
+        s.update({"a", "b"}, {"a:1": "d1", "b:1": "d2"})
+        s.mark_baselined()
+        s.update({"a"}, {"a:1": "d1"})
+        self.assertIn("b:1", s.tags)
+        s.update({"a"}, {"a:1": "d1"}, gone={"b"})
+        self.assertNotIn("b:1", s.tags)
+        self.assertEqual([e["type"] for e in s.events], ["deleted"])
+
+    def test_event_count_cap(self):
+        s = self.state(max_events=5)
+        s.mark_baselined()
+        for i in range(50):
+            s.update({"a"}, {"a:1": f"d{i}"})
+        self.assertEqual(len(s.events), 5)
+        self.assertEqual(s.events[-1]["seq"], 50)
+
+    def test_event_age_cap(self):
+        clk = Clock()
+        s = self.state(clock=clk, max_age=100)
+        s.mark_baselined()
+        s.update({"a"}, {"a:1": "d1"})
+        clk.now += 101
+        s.update({"a"}, {"a:1": "d1"})
+        self.assertEqual(len(s.events), 0)
+
+    def test_persistence_round_trip_and_atomic_write(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "state.json")
+        s = P.State(path, clock=Clock())
+        s.mark_baselined()
+        s.update({"a"}, {"a:1": "d1"})
+        s.save(force=True)
+        self.assertEqual(os.listdir(d), ["state.json"])  # no temp file left behind
+        t = P.State(path, clock=Clock())
+        self.assertEqual((t.tags, list(t.events), t.seq, t.baselined), (s.tags, list(s.events), s.seq, True))
+        mtime = os.stat(path).st_mtime_ns
+        s.save(force=True)  # unchanged content is not rewritten
+        self.assertEqual(os.stat(path).st_mtime_ns, mtime)
+
+    def test_save_is_rate_limited(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        clk = Clock()
+        s = P.State(os.path.join(d, "state.json"), save_every=30, clock=clk)
+        s.mark_baselined()
+        s.update({"a"}, {"a:1": "d1"})
+        s.save()
+        first = open(s.path).read()
+        s.update({"a"}, {"a:1": "d2"})
+        s.save()
+        self.assertEqual(open(s.path).read(), first)
+        clk.now += 31
+        s.save()
+        self.assertNotEqual(open(s.path).read(), first)
+
+    def test_corrupt_file_is_ignored_and_load_applies_caps(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "state.json")
+        open(path, "w").write("{broken")
+        open(os.path.join(d, ".state-leftover"), "w").write("x")
+        s = P.State(path)
+        self.assertEqual((s.tags, len(s.events)), ({}, 0))
+        self.assertEqual(os.listdir(d), ["state.json"])
+
+
+class FakeRegistry:
+    def __init__(self, repos):
+        self.repos, self.heads = repos, 0
+
+    def catalog(self):
+        return list(self.repos)
+
+    def tags(self, r):
+        return list(self.repos[r])
+
+    def manifest(self, r, t, head=False):
+        self.heads += 1
+        return b"", "", self.repos[r][t]
+
+
+class PollerTests(unittest.TestCase):
+    def test_work_per_cycle_is_capped_and_resumes(self):
+        reg = FakeRegistry({f"r{i}": {"t": f"d{i}"} for i in range(10)})
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st, max_tags=3)
+        p.cycle()
+        self.assertEqual(reg.heads, 3)
+        self.assertFalse(st.baselined)
+        for _ in range(3):
+            p.cycle()
+        self.assertTrue(st.baselined)
+        self.assertEqual(len(st.tags), 10)
+
+    def test_detects_changes_after_baseline(self):
+        reg = FakeRegistry({"a": {"1": "d1"}})
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st, max_tags=100)
+        p.cycle()
+        reg.repos["a"]["2"] = "d2"
+        reg.repos["a"]["1"] = "dX"
+        p.cycle()
+        del reg.repos["a"]
+        p.cycle()
+        self.assertEqual(sorted((e["type"], e["ref"]) for e in st.events), [("deleted", "a:1"), ("deleted", "a:2"), ("new", "a:2"), ("retagged", "a:1")])
+
+    def test_poller_survives_errors(self):
+        class Down(FakeRegistry):
+            def catalog(self):
+                raise R.RegistryError(502, "registry unreachable")
+        p = P.Poller(Down({}), P.State(clock=Clock()), interval=0)
+        p.kick.set()
+        t = threading.Thread(target=p.run, daemon=True)
+        t.start()
+        t.join(0.3)
+        self.assertTrue(t.is_alive())
+        p.stop.set()
+        p.kick.set()
+
+
+class ThrottleTests(unittest.TestCase):
+    def test_repeated_errors_collapse(self):
+        clk = Clock()
+        th = P.Throttle(every=600, clock=clk)
+        with self.assertLogs("poller", "INFO") as cm:
+            for _ in range(100):
+                th.error("registry", "poll failed: down")
+                clk.now += 1
+            clk.now += 600
+            th.error("registry", "poll failed: down")
+            th.error("registry", "poll failed: other")
+            th.ok("registry")
+        self.assertEqual(len(cm.output), 4)  # first, reminder with count, state change, recovery
+        self.assertIn("repeated 99 more times", cm.output[1])
+
+
+class Bounded(unittest.TestCase):
+    def test_excess_connections_get_503(self):
+        import socket
+        cfg = S.Config({"UI_MAX_SSE": "2"})
+        srv = S.BoundedServer(("127.0.0.1", 0), S.make_handler(cfg), 2)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        port = srv.server_address[1]
+        held = [socket.create_connection(("127.0.0.1", port)) for _ in range(2)]  # idle connections hold the slots
+        self.addCleanup(lambda: [h.close() for h in held])
+        import time
+        time.sleep(0.3)
+        c = socket.create_connection(("127.0.0.1", port))
+        self.addCleanup(c.close)
+        c.settimeout(3)
+        self.assertTrue(c.recv(100).startswith(b"HTTP/1.1 503"))
+
+    def test_sse_clients_are_capped(self):
+        cfg = S.Config({"UI_MAX_SSE": "1"})
+        self.assertTrue(cfg.sse_slots.acquire(blocking=False))
+        self.assertFalse(cfg.sse_slots.acquire(blocking=False))
 
 
 if __name__ == "__main__":

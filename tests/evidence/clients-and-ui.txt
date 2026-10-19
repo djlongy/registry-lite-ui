@@ -1,6 +1,6 @@
 ### UI up
-registry Up 4 seconds
-ui Up 4 seconds (health: starting)
+registry Up 5 seconds
+ui Up 5 seconds (healthy)
 == push and pull with skopeo and docker (label up)
 PASS skopeo push multi-arch busybox
 PASS multi-arch busybox digest identical to source
@@ -53,4 +53,12 @@ PASS POST as text/plain: 403
 PASS invalid source name rejected
 PASS uppercase destination rejected
 PASS CSP header set
+failures: 0
+== Recent view and live stream (poll interval 2 s)
+PASS pushed tag appears in Recent as new, within the poll window
+PASS overwritten tag appears as retagged
+PASS deleted tag appears as deleted
+PASS SSE stream delivered 3 change messages
+PASS events are newest first
+PASS history survives a UI restart (21 events)
 failures: 0

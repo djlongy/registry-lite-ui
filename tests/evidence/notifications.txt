@@ -1,0 +1,21 @@
+# registry:2.8.3 notifications with the endpoint down (connection refused) vs no notifications
+## n-ctl
+mem before: 4.754MiB / 2.832GiB
+batch 1: 10000 pushes in 36.78s (3.68 ms each)
+batch 2: 10000 pushes in 36.00s (3.60 ms each)
+batch 3: 10000 pushes in 34.41s (3.44 ms each)
+batch 4: 10000 pushes in 33.35s (3.34 ms each)
+batch 5: 10000 pushes in 36.70s (3.67 ms each)
+mem after 50000 pushes: 651.7MiB / 2.832GiB
+## n-dead
+mem before: 5.188MiB / 2.832GiB
+batch 1: 10000 pushes in 36.72s (3.67 ms each)
+batch 2: 10000 pushes in 67.13s (6.71 ms each)
+batch 3: 10000 pushes in 69.26s (6.93 ms each)
+batch 4: 10000 pushes in 71.78s (7.18 ms each)
+batch 5: 10000 pushes in 76.14s (7.61 ms each)
+mem after 50000 pushes: 873MiB / 2.832GiB
+## n-dead log lines mentioning the endpoint: 0
+
+## Source check (distribution v2.8.3, notifications/sinks.go)
+eventQueue: "It is unbounded and thread safe but the sink must be reliable". Events from a failing endpoint accumulate in registry memory.
