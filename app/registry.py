@@ -200,11 +200,19 @@ def describe(status, data):
         return f"registry said {status}"
 
 
+def child_entries(manifest_bytes):
+    """The entries of an index, which must be a list of objects."""
+    items = json_load(manifest_bytes).get("manifests", [])
+    if not isinstance(items, list) or not all(isinstance(m, dict) for m in items):
+        raise RegistryError(502, "registry returned unexpected JSON")
+    return items
+
+
 def children(manifest_bytes, media_type):
     """Child manifest digests of an index, else []."""
     if media_type not in INDEX_TYPES:
         return []
-    return [check_digest(m.get("digest")) for m in json_load(manifest_bytes).get("manifests", [])]
+    return [check_digest(m.get("digest")) for m in child_entries(manifest_bytes)]
 
 
 def blobs(manifest_bytes):
@@ -252,45 +260,75 @@ def tags_of(c, repo, digest):
     return [t for t in c.tags(repo) if c.manifest(repo, t, head=True)[2] == digest]
 
 
+PLATFORM_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
+MAX_SURVEY_FETCHES = 500  # index manifests read while looking for the parents of one digest
+
+
 def platform_of(entry):
+    """os/architecture/variant of an index entry. The text is chosen by whoever pushed the index, so odd parts become 'unknown'."""
     p = entry.get("platform")
-    return "/".join(str(p[k]) for k in ("os", "architecture", "variant") if isinstance(p, dict) and k in p)
+    parts = [p[k] for k in ("os", "architecture", "variant") if isinstance(p, dict) and k in p]
+    return "/".join(x if isinstance(x, str) and PLATFORM_RE.fullmatch(x) else "unknown" for x in parts)
 
 
-def check_not_a_child(c, repo, digest):
-    """Refuse (409) when a tagged index in repo lists digest as a child: the registry deletes by digest, so the
-    delete would break that index for the platform. An index no tag points at cannot be found from the API."""
-    seen, used_by = {}, {}
+def survey(c, repo, digest):
+    """One pass over the tags of repo, right before a delete of digest. Returns (parents, kept): the tagged indexes
+    that list digest as a child, directly or through up to MAX_DEPTH nested indexes, with the platform, and the digests
+    that other tagged manifests keep alive. An index no tag reaches cannot be found from the API."""
+    cache, parents, kept = {}, {}, set()
+
+    def entries(d):
+        if d not in cache:
+            if len(cache) >= MAX_SURVEY_FETCHES:
+                raise RegistryError(400, "too many indexes to check before deleting")
+            cache[d] = child_entries(c.manifest(repo, d)[0])
+        return cache[d]
+
+    def reaches(d, depth):  # the platform of the entry of d that leads to digest, or None
+        for m in entries(d):
+            if m.get("digest") == digest:
+                return platform_of(m)
+            if depth < MAX_DEPTH and m.get("mediaType") in INDEX_TYPES and reaches(check_digest(m.get("digest")), depth + 1) is not None:
+                return platform_of(m)
+        return None
+
     for tag in c.tags(repo):
         _, mtype, dg = c.manifest(repo, tag, head=True)
-        if mtype not in INDEX_TYPES or dg == digest:
+        if dg == digest:
             continue
-        if dg not in seen:
-            seen[dg] = {m.get("digest"): platform_of(m) for m in json_load(c.manifest(repo, dg)[0]).get("manifests", [])}
-        if digest in seen[dg]:
-            used_by[tag] = seen[dg][digest]
-    if used_by:
-        names = ", ".join(sorted(used_by))
-        plat = ", ".join(sorted({p for p in used_by.values() if p}))
-        raise RegistryError(409, f"{digest[:19]} is a child{f' ({plat})' if plat else ''} of the index tagged {names}; "
-                                 "deleting it would break that index. Delete or retag the index first.")
+        kept.add(dg)
+        if mtype in INDEX_TYPES:
+            kept.update(check_digest(m.get("digest")) for m in entries(dg))
+            found = reaches(dg, 1)
+            if found is not None:
+                parents[tag] = found
+    return parents, kept
+
+
+def refuse_parents(parents, digest):
+    """409 when a tagged index uses digest: the registry deletes by digest, so the delete would break that index."""
+    if not parents:
+        return
+    tags = sorted(parents)
+    shown = ", ".join(tags[:5]) + (f" and {len(tags) - 5} more" if len(tags) > 5 else "")
+    plat = ", ".join(sorted({p for p in parents.values() if p}))[:60]
+    raise RegistryError(409, (f"{digest[:19]} is a child{f' ({plat})' if plat else ''} of the index tagged {shown}; "
+                              "deleting it would break that index. Delete or retag the index first.")[:MAX_MESSAGE])
 
 
 def delete(c, repo, digest, with_children=False):
-    """Delete a manifest by digest. With with_children, also delete index children no other tagged index in the repo uses."""
+    """Delete a manifest by digest. Refused (409) while a tagged index uses it as a child. With with_children, also
+    delete index children no other tagged manifest in the repo uses."""
     check_repo(repo)
     if not DIGEST_RE.fullmatch(digest):
         raise RegistryError(400, "delete takes a digest")
-    check_not_a_child(c, repo, digest)
     if not c.delete_enabled():
         raise RegistryError(405, DELETE_OFF)
     data, mtype, _ = c.manifest(repo, digest)
     orphans = set(children(data, mtype)) if with_children else set()
-    for tag in c.tags(repo) if orphans else []:
-        d, t, dg = c.manifest(repo, tag)
-        if dg != digest:  # another tagged manifest keeps itself and its children
-            orphans -= {dg, *children(d, t)}
-    gone = [digest, *sorted(orphans)]
+    parents, kept = survey(c, repo, digest)  # one pass, right before the DELETE calls; a push after it can still race
+    refuse_parents(parents, digest)
+    gone = [digest, *sorted(orphans - kept)]
     for d in gone:
         c.call("DELETE", f"/v2/{repo}/manifests/{d}", ok=(202,))
     return gone
@@ -302,7 +340,8 @@ def move(c, src, src_ref, dst, dst_ref):
         raise RegistryError(400, "move needs two repositories: registry:2 deletes by digest, which would remove both tags")
     if not c.delete_enabled():
         raise RegistryError(405, "nothing copied. " + DELETE_OFF)
-    check_not_a_child(c, check_repo(src), c.manifest(src, check_ref(src_ref), head=True)[2])  # before anything is copied
+    before = c.manifest(check_repo(src), check_ref(src_ref), head=True)[2]
+    refuse_parents(survey(c, src, before)[0], before)  # before anything is copied
     digest = copy(c, src, src_ref, dst, dst_ref)
     if c.manifest(dst, dst_ref, head=True)[2] != digest:
         raise RegistryError(502, "destination digest differs, source kept")

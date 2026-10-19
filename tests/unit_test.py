@@ -524,6 +524,40 @@ class ChildOfAnIndex(unittest.TestCase):
         self.assertEqual(e.exception.status, 409)
         self.assertEqual(c.calls, [])
 
+    def test_a_grandchild_is_protected_through_an_untagged_middle_index(self):
+        mid, leaf = D("7"), D("8")
+        top = json.dumps({"manifests": [{"digest": mid, "mediaType": IDX, "platform": {"os": "linux", "architecture": "arm64"}}]}).encode()
+        middle = json.dumps({"manifests": [{"digest": leaf, "mediaType": IMG}]}).encode()
+
+        class C(FakeClient):
+            tags = lambda self, repo: ["a"]  # noqa: E731
+            delete_enabled = lambda self: True  # noqa: E731
+
+            def manifest(self, repo, ref, head=False):
+                return {"a": (top, IDX, D("6")), D("6"): (top, IDX, D("6")), mid: (middle, IDX, mid), leaf: (b"{}", IMG, leaf)}[ref]
+        c = C()
+        with self.assertRaises(R.RegistryError) as e:
+            R.delete(c, "test/busybox", leaf)
+        self.assertEqual(e.exception.status, 409)
+        self.assertIn("(linux/arm64)", e.exception.message)
+        self.assertEqual([m for m, _ in c.calls if m == "DELETE"], [])
+
+    def test_message_text_is_controlled(self):
+        evil = {"platform": {"os": "\x1b[31mred\nDeletion SUCCEEDED", "architecture": "amd64"}}
+        self.assertEqual(R.platform_of(evil), "unknown/amd64")
+        parents = {f"t{i}": "linux/amd64" for i in range(40)}
+        child = D("b")
+        with self.assertRaises(R.RegistryError) as e:
+            R.refuse_parents(parents, child)
+        self.assertIn("and 35 more", e.exception.message)
+        self.assertLessEqual(len(e.exception.message), R.MAX_MESSAGE)
+
+    def test_a_manifests_value_of_the_wrong_type_fails_closed(self):
+        for bad in (b'{"manifests":{"digest":"x"}}', b'{"manifests":["x"]}'):
+            with self.assertRaises(R.RegistryError) as e:
+                R.child_entries(bad)
+            self.assertEqual(e.exception.status, 502)
+
     def test_platform_is_named(self):
         self.assertEqual(R.platform_of({"platform": {"os": "linux", "architecture": "arm64", "variant": "v8"}}), "linux/arm64/v8")
         self.assertEqual(R.platform_of({}), "")
