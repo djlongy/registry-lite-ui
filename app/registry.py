@@ -271,35 +271,39 @@ def platform_of(entry):
     return "/".join(x if isinstance(x, str) and PLATFORM_RE.fullmatch(x) else "unknown" for x in parts)
 
 
+def index_entries(c, repo, cache, d):
+    """The entries of the index manifest d, read once per survey."""
+    if d not in cache:
+        if len(cache) >= MAX_SURVEY_FETCHES:
+            raise RegistryError(400, "too many indexes to check before deleting")
+        cache[d] = child_entries(c.manifest(repo, d)[0])
+    return cache[d]
+
+
+def reaches(c, repo, cache, target, d, depth):
+    """The platform of the entry of index d that leads to target, directly or through nested indexes, else None."""
+    for m in index_entries(c, repo, cache, d):
+        if m.get("digest") == target:
+            return platform_of(m)
+        nested = depth < MAX_DEPTH and m.get("mediaType") in INDEX_TYPES
+        if nested and reaches(c, repo, cache, target, check_digest(m.get("digest")), depth + 1) is not None:
+            return platform_of(m)
+    return None
+
+
 def survey(c, repo, digest):
     """One pass over the tags of repo, right before a delete of digest. Returns (parents, kept): the tagged indexes
     that list digest as a child, directly or through up to MAX_DEPTH nested indexes, with the platform, and the digests
     that other tagged manifests keep alive. An index no tag reaches cannot be found from the API."""
     cache, parents, kept = {}, {}, set()
-
-    def entries(d):
-        if d not in cache:
-            if len(cache) >= MAX_SURVEY_FETCHES:
-                raise RegistryError(400, "too many indexes to check before deleting")
-            cache[d] = child_entries(c.manifest(repo, d)[0])
-        return cache[d]
-
-    def reaches(d, depth):  # the platform of the entry of d that leads to digest, or None
-        for m in entries(d):
-            if m.get("digest") == digest:
-                return platform_of(m)
-            if depth < MAX_DEPTH and m.get("mediaType") in INDEX_TYPES and reaches(check_digest(m.get("digest")), depth + 1) is not None:
-                return platform_of(m)
-        return None
-
     for tag in c.tags(repo):
         _, mtype, dg = c.manifest(repo, tag, head=True)
         if dg == digest:
             continue
         kept.add(dg)
         if mtype in INDEX_TYPES:
-            kept.update(check_digest(m.get("digest")) for m in entries(dg))
-            found = reaches(dg, 1)
+            kept.update(check_digest(m.get("digest")) for m in index_entries(c, repo, cache, dg))
+            found = reaches(c, repo, cache, digest, dg, 1)
             if found is not None:
                 parents[tag] = found
     return parents, kept
