@@ -173,12 +173,12 @@ Deleting a manifest does not free disk. Blobs are freed by `registry garbage-col
 
 ```sh
 docker compose stop registry
-podman run --rm -v <registry volume>:/var/lib/registry registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 \
+podman run --rm -v <registry volume>:/var/lib/registry:Z registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 \
   registry garbage-collect /etc/docker/registry/config.yml   # add --dry-run to list what would be deleted
 docker compose start registry
 ```
 
-`<registry volume>` is the `registry-data` volume of the compose project (`docker volume ls`), or the path the registry mounts at `/var/lib/registry`. `docker run` takes the same arguments.
+`:Z` is needed under SELinux (a bind-mounted `/data/registry` otherwise fails with permission denied); the registry relabels the storage again when it restarts. `<registry volume>` is the `registry-data` volume of the compose project (`docker volume ls`), or the path the registry mounts at `/var/lib/registry`. `docker run` takes the same arguments.
 
 Do not add `--delete-untagged`. In registry 2.8 it deletes the child manifests of multi-arch images, and the index then fails to pull (reproduced in this repo's test run). The registry API cannot list untagged manifests, so the UI cannot sweep them. It deletes children together with an index instead, which leaves nothing untagged behind. A manifest orphaned by pushing over a tag stays until you remove it by digest. A systemd timer for the job:
 
@@ -188,7 +188,7 @@ Do not add `--delete-untagged`. In registry 2.8 it deletes the child manifests o
 Type=oneshot
 WorkingDirectory=/opt/registry-lite-ui
 ExecStartPre=/usr/bin/podman-compose stop registry
-ExecStart=/usr/bin/podman run --rm -v <registry volume>:/var/lib/registry registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 registry garbage-collect /etc/docker/registry/config.yml
+ExecStart=/usr/bin/podman run --rm -v <registry volume>:/var/lib/registry:Z registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 registry garbage-collect /etc/docker/registry/config.yml
 ExecStopPost=/usr/bin/podman-compose start registry   # runs even when GC fails
 ```
 
