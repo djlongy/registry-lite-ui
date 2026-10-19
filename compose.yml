@@ -12,6 +12,7 @@ services:
     volumes: [registry-data:/var/lib/registry]
     logging: *logging
     cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]  # reads a TLS key owned by another user; nothing else
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
 
