@@ -1,4 +1,4 @@
-issuer: https://dex.example.internal/dex
+issuer: https://dex.example.internal:5556/dex
 storage: {type: memory}
 web: {https: 0.0.0.0:5556, tlsCert: /certs/tls.crt, tlsKey: /certs/tls.key}
 expandEnv: true

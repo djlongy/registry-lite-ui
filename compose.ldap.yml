@@ -1,7 +1,7 @@
 # LDAP login: dex with its LDAP connector as the OIDC provider for compose.oidc.yml.
 # Use with both: -f compose.yml -f compose.oidc.yml -f compose.ldap.yml
 # dex serves HTTPS with TLS_CERT and a readable copy of the key (DEX_TLS_KEY); LDAP passwords go through it.
-# Set OIDC_ISSUER_URL to the public URL of dex, for example https://dex.example.internal/dex, and DEX_HOST to its host name.
+# Set OIDC_ISSUER_URL to the public URL of dex, for example https://dex.example.internal:5556/dex (the port dex listens on; it must match `issuer` in auth/dex-ldap.yaml), and DEX_HOST to its host name.
 # oauth2-proxy trusts TLS_CERT (a CA, or the self-signed certificate itself) and reaches dex by that name inside the compose network.
 # Never set OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY: it removes the protection the HTTPS listener adds.
 x-logging: &logging

@@ -313,6 +313,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(e.status if 400 <= e.status < 600 else 502, {"error": e.message})
         except (KeyError, ValueError, TypeError):
             self.reply(400, {"error": "bad request"})
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the client left, or the reaper closed a slow one: nothing to answer
         except Exception as e:  # a bug must not drop the connection or leak a traceback
             self.cfg.errors.error("api", f"unhandled {type(e).__name__} on {method}")
             self.reply(500, {"error": "internal error"})

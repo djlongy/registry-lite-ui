@@ -63,6 +63,7 @@ class State:
         self.since = clock()
         self.cond = threading.Condition()
         self.saved, self.saved_at, self.dirty = None, 0, False
+        self.oversize_warned = False
         self.write_lock = threading.Lock()  # the poller and the SIGTERM path both save
         if path:
             self.load()
@@ -137,6 +138,9 @@ class State:
         if text == self.saved:
             return
         if len(text) > MAX_STATE_BYTES:
+            if self.oversize_warned:
+                return
+            self.oversize_warned = True
             log.warning("state is %d bytes, over the %d byte limit: history is kept in memory only", len(text), MAX_STATE_BYTES)
             return
         d = os.path.dirname(self.path)

@@ -1,7 +1,8 @@
 # TLS, reusing a certificate that already exists on the host. Set in .env:
 #   TLS_CERT       host path of the certificate (full chain), also used as the CA the UI trusts
 #   TLS_KEY        host path of the key, mounted into the registry only (it runs as root)
-#   UI_TLS_KEY     a copy of the key readable by uid 65534, see README
+#   UI_TLS_KEY     a copy of the key readable by uid 65534, see README. Required here, but unused when an auth TLS
+#                  override serves the certificate instead; then point it at any readable file such as PROXY_TLS_KEY
 #   REGISTRY_HOST  the name in the certificate, for example docker.example.internal
 services:
   registry:

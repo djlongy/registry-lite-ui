@@ -130,7 +130,7 @@ class Client:
             size += len(data)
             items = json_load(data).get(key) or []
             if not isinstance(items, list):
-                raise RegistryError(502, "registry returned unexpected JSON")
+                raise RegistryError(400, "registry returned a list of the wrong type")  # 400: the poller skips this repo
             out += items
             if len(out) > MAX_ITEMS or size > MAX_LIST_BYTES:
                 raise RegistryError(400, "registry list is too large")

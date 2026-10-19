@@ -557,8 +557,9 @@ class Resilience(unittest.TestCase):
         self.addCleanup(u.close)
         c = R.Client(u.url)
         self.assertEqual(c.tags("a"), ["ok"])
-        with self.assertRaises(R.RegistryError):
+        with self.assertRaises(R.RegistryError) as e:
             c.tags("b")
+        self.assertEqual(e.exception.status, 400)  # the poller skips a 400 and goes on
 
     def test_oversized_state_is_not_written_and_save_waits_for_the_lock(self):
         d = tempfile.mkdtemp()
@@ -567,7 +568,10 @@ class Resilience(unittest.TestCase):
         s.mark_baselined()
         old, P.MAX_STATE_BYTES = P.MAX_STATE_BYTES, 10
         self.addCleanup(setattr, P, "MAX_STATE_BYTES", old)
-        s.save(force=True)
+        with self.assertLogs("poller", "WARNING") as cm:
+            s.save(force=True)
+            s.save(force=True)
+        self.assertEqual(len(cm.output), 1)  # one warning, not one per save
         self.assertEqual(os.listdir(d), [])
         P.MAX_STATE_BYTES = old
         with s.write_lock:
