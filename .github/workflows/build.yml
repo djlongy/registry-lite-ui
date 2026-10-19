@@ -33,14 +33,19 @@ jobs:
           curl -fs localhost:8080/api/repos | grep -q ci/busybox
           curl -fs 'localhost:8080/api/tags?repo=ci/busybox' | grep -q '"tag": "1"'
           podman logs ui
-      - name: Export the manifest list
+          podman inspect --format '{{.Config.Healthcheck}}' localhost/ui:ci | grep -q 8080
+      - name: Export one archive per platform
         if: github.event_name == 'push'
-        run: buildah manifest push --all --format v2s2 localhost/ui:ci oci-archive:image.tar
+        run: |
+          # docker archives keep the HEALTHCHECK, which an OCI archive drops
+          for a in amd64 arm64; do
+            skopeo --override-os linux --override-arch $a copy containers-storage:localhost/ui:ci docker-archive:ui-$a.tar:localhost/ui:$a
+          done
       - if: github.event_name == 'push'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: image
-          path: image.tar
+          path: ui-*.tar
           retention-days: 1
 
   publish:
@@ -58,11 +63,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          printf %s "$GH_TOKEN" | skopeo login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          printf %s "$GH_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          podman manifest create ui
+          for a in amd64 arm64; do podman load -q -i ui-$a.tar && podman manifest add ui localhost/ui:$a; done
           tags=("$GITHUB_SHA")
           [ "$GITHUB_REF" = refs/heads/main ] && tags+=(latest)
           [ "$GITHUB_REF_TYPE" = tag ] && tags+=("${GITHUB_REF_NAME#v}")
-          for t in "${tags[@]}"; do skopeo copy --all --format v2s2 oci-archive:image.tar "docker://$IMAGE:$t"; done
+          for t in "${tags[@]}"; do podman manifest push --all --format v2s2 ui "docker://$IMAGE:$t"; done
           skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | grep -E '"architecture"'
-          skopeo inspect --override-os linux --override-arch arm64 --config "docker://$IMAGE:$GITHUB_SHA" | grep -q Healthcheck
+          skopeo --override-os linux --override-arch arm64 inspect --config "docker://$IMAGE:$GITHUB_SHA" | grep -q Healthcheck
           skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | sha256sum
