@@ -17,7 +17,11 @@ services:
     restart: unless-stopped
 
   ui:
-    build: .
+    # `up -d` pulls this image, `up -d --build` builds Containerfile and tags it with the same name.
+    image: ${UI_IMAGE:-ghcr.io/djlongy/registry-lite-ui:latest}
+    build:
+      context: .
+      dockerfile: Containerfile
     ports: ["${UI_BIND:-127.0.0.1}:${UI_PORT:-8080}:8080"]
     environment:
       REGISTRY_URL: http://registry:5000

@@ -11,7 +11,7 @@ docker compose up -d --build   # registry on :5000 (unchanged), UI on http://loc
 
 ## Requirements
 
-- Docker Compose v2 or podman-compose. Python is only needed to run the unit tests (3.9+; the image runs 3.13).
+- Docker Compose v2 or podman-compose. Python is only needed to run the unit tests (3.9+; the image runs 3.12).
 - A `registry:2` (distribution 2.8) with `REGISTRY_STORAGE_DELETE_ENABLED=true` for delete, move and prune. Browse and copy work without it.
 - The registry uses no token auth. Anonymous access and basic auth are supported.
 
@@ -38,6 +38,23 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 
 `docker compose up -d --build`, open `http://localhost:8080`, and keep pushing and pulling against `registry.example.internal:5000` as before.
 
+## Image
+
+| | |
+|---|---|
+| Reference | `ghcr.io/djlongy/registry-lite-ui`, tagged `latest` (main), the commit sha, and the version on release tags |
+| Base | `registry.access.redhat.com/ubi9/python-312-minimal`, pinned by digest, no pip installs |
+| Platforms | `linux/amd64`, `linux/arm64` |
+| Runtime user | uid and gid 65534, read-only root filesystem, `/state` owned by 65534 |
+
+`docker compose up -d` and `podman-compose up -d` pull the prebuilt image. Set `UI_IMAGE` to use another reference. To build it yourself:
+
+```sh
+podman build --format docker -f Containerfile -t registry-lite-ui .   # or: docker compose up -d --build
+```
+
+`--format docker` keeps the `HEALTHCHECK`, which the OCI format drops. CI builds with `buildah` (no docker daemon) for both platforms, runs the unit tests and a podman smoke test, then pushes the manifest list. `.gitlab-ci.yml` does the same with rootless buildah on an unprivileged GitLab runner and pushes to `$CI_REGISTRY_IMAGE`.
+
 ## Components
 
 | File | What it is |
@@ -47,7 +64,8 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 | `app/server.py` | A `http.server` app that serves three static files, a JSON API and a Server-Sent Events stream, with CSRF checks, connection caps and logging to stdout. |
 | `app/poller.py` | A thread that polls the registry's own API for tag and digest changes and keeps a capped event history in memory, optionally in one JSON file. It never talks to anything but the registry. |
 | `app/static/` | Vanilla HTML, CSS and JS with no build step. Data is rendered with `textContent`, never `innerHTML`, and the theme is a class set by same-origin JS under a strict CSP. |
-| `Dockerfile` | `python:3.13-slim` pinned by digest, uid 65534, no pip installs. |
+| `Containerfile` | `ubi9/python-312-minimal` pinned by digest, uid 65534, no pip installs. |
+| `.github/workflows/build.yml`, `.gitlab-ci.yml` | Build the image with buildah, test it, and publish it to ghcr.io or the GitLab registry. |
 | `compose.basic.yml`, `compose.oidc.yml`, `compose.ldap.yml` | Optional auth in front of the UI only, using stock `nginx-unprivileged`, `oauth2-proxy` and `dex`. |
 | `compose.tls.yml`, `compose.basic-tls.yml`, `compose.oidc-tls.yml` | Optional HTTPS from an existing certificate, for the registry, the UI or the auth proxy. `server_context` in `app/server.py` sets up the TLS 1.2+ listener. |
 

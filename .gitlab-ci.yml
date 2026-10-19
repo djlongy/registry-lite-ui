@@ -1,0 +1,31 @@
+# Builds the image with rootless buildah in an unprivileged job: no docker daemon, no dind, no privileged runner.
+stages: [test, build]
+
+unit-test:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - python3 -m unittest discover -s tests -p 'unit_test.py' -v
+
+build:
+  stage: build
+  # quay.io/buildah/stable:latest (v1.43.5)
+  image: quay.io/buildah/stable@sha256:7c2b605262748ace2c5c57c5550942d0adad57aec82ede3070927722306c0ffb
+  variables:
+    STORAGE_DRIVER: vfs
+    BUILDAH_ISOLATION: chroot
+    BUILDAH_FORMAT: docker  # keeps HEALTHCHECK, which the OCI format drops
+  script:
+    - buildah build -f Containerfile -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - |
+      tags=""
+      [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && tags="$tags latest"
+      [ -n "$CI_COMMIT_TAG" ] && tags="$tags $CI_COMMIT_TAG"
+      if [ -n "$tags" ]; then
+        printf %s "$CI_JOB_TOKEN" | buildah login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+        buildah push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+        for t in $tags; do
+          buildah tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" "$CI_REGISTRY_IMAGE:$t"
+          buildah push "$CI_REGISTRY_IMAGE:$t"
+        done
+      fi

@@ -1,0 +1,67 @@
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: read
+env:
+  IMAGE: ghcr.io/djlongy/registry-lite-ui
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: python3 -m unittest discover -s tests -p 'unit_test.py' -v
+      - name: Build amd64 and arm64 with buildah
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
+          # docker format keeps HEALTHCHECK, which the OCI format drops
+          buildah build --format docker --platform linux/amd64,linux/arm64 --manifest localhost/ui:ci -f Containerfile .
+      - name: Smoke test with podman
+        run: |
+          podman network create ci
+          podman run -d --name registry --network ci -p 5000:5000 -e REGISTRY_STORAGE_DELETE_ENABLED=true \
+            registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          podman run -d --name ui --network ci -p 8080:8080 --read-only -v ui-state:/state \
+            -e REGISTRY_URL=http://registry:5000 -e UI_STATE_DIR=/state localhost/ui:ci
+          for i in $(seq 30); do curl -fs localhost:5000/v2/ && curl -fs localhost:8080/healthz && break; sleep 1; done
+          podman exec ui id -u | grep -qx 65534
+          skopeo copy --dest-tls-verify=false docker://docker.io/library/busybox:latest docker://localhost:5000/ci/busybox:1
+          sleep 2
+          curl -fs localhost:8080/api/repos | grep -q ci/busybox
+          curl -fs 'localhost:8080/api/tags?repo=ci/busybox' | grep -q '"tag": "1"'
+          podman logs ui
+      - name: Export the manifest list
+        if: github.event_name == 'push'
+        run: buildah manifest push --all localhost/ui:ci oci-archive:image.tar
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image
+          path: image.tar
+          retention-days: 1
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image
+      - name: Push the manifest list to ghcr.io
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf %s "$GH_TOKEN" | skopeo login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          tags=("$GITHUB_SHA")
+          [ "$GITHUB_REF" = refs/heads/main ] && tags+=(latest)
+          [ "$GITHUB_REF_TYPE" = tag ] && tags+=("${GITHUB_REF_NAME#v}")
+          for t in "${tags[@]}"; do skopeo copy --all oci-archive:image.tar "docker://$IMAGE:$t"; done
+          skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | grep -E '"architecture"'
+          skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | sha256sum

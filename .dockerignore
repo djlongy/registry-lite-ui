@@ -1,4 +1,6 @@
+
 .git
-tests
-docs
 .github
+.gitlab-ci.yml
+docs
+tests
