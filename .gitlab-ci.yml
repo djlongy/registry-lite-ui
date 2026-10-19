@@ -2,7 +2,7 @@
 stages: [test, build]
 
 variables:
-  # quay.io/buildah/stable:v1.43.2. A site with an internal mirror sets BUILDAH_IMAGE, and BASE_IMAGE for the Containerfile base, as project CI variables.
+  # quay.io/buildah/stable:v1.43.2. A site with an internal mirror sets BUILDAH_IMAGE, and BASE_IMAGE for the Containerfile base, as project CI variables. REGISTRY_CA_BUNDLE (type File) trusts a registry certificate from an internal CA.
   BUILDAH_IMAGE: quay.io/buildah/stable@sha256:704af5d17babbd88bd93c06ecea7554001a2e9570e1fd54687188d3ae5de0e55
 
 unit-test:
@@ -26,6 +26,9 @@ build:
       [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && tags="$tags latest"
       [ -n "$CI_COMMIT_TAG" ] && tags="$tags $CI_COMMIT_TAG"
       if [ -n "$tags" ]; then
+        if [ -n "${REGISTRY_CA_BUNDLE:-}" ]; then  # a File variable holding the PEM chain, for a registry with an internal CA
+          mkdir -p "/etc/containers/certs.d/$CI_REGISTRY" && cp "$REGISTRY_CA_BUNDLE" "/etc/containers/certs.d/$CI_REGISTRY/ca.crt"
+        fi
         printf %s "$CI_JOB_TOKEN" | buildah login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
         buildah push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
         for t in $tags; do
