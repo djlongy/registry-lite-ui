@@ -29,7 +29,8 @@ refused "registry refuses plain HTTP" curl -fsS "http://localhost:$REGISTRY_PORT
 refused "registry HTTPS fails without the CA" curl -fsS "https://localhost:$REGISTRY_PORT/v2/"
 SRC=${SRC_REPO:-mirror.gcr.io/library}
 refused "skopeo push fails without the CA" skopeo copy --quiet --override-os linux --override-arch arm64 docker://$SRC/alpine:latest docker://$REG/tls/alpine:s
-skopeo copy --quiet --all --dest-cert-dir "$WORK/certs" docker://$SRC/busybox:latest docker://$REG/tls/busybox:m >/dev/null 2>&1 && ok "skopeo push multi-arch with --cert-dir" || bad "skopeo push multi-arch"
+retry() { for _ in 1 2 3; do "$@" 2>"$WORK/err" && return 0; sleep 3; done; cat "$WORK/err"; return 1; }
+retry skopeo copy --quiet --all --dest-cert-dir "$WORK/certs" docker://$SRC/busybox:latest docker://$REG/tls/busybox:m >/dev/null && ok "skopeo push multi-arch with --cert-dir" || bad "skopeo push multi-arch"
 skopeo copy --quiet --override-os linux --override-arch arm64 --dest-cert-dir "$WORK/certs" docker://$SRC/alpine:latest docker://$REG/tls/alpine:s >/dev/null 2>&1 && ok "skopeo push single-arch with --cert-dir" || bad "skopeo push single-arch"
 skopeo copy --quiet --all --src-cert-dir "$WORK/certs" docker://$REG/tls/busybox:m dir:"$WORK/pull" >/dev/null 2>&1 && ok "skopeo pull with --cert-dir" || bad "skopeo pull"
 # docker never verifies registries that resolve to loopback, so map the certificate name to the daemon host's own address
