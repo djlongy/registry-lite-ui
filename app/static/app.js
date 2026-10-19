@@ -1677,7 +1677,7 @@ $("help").onclick = () => helpPanel();
 tree.root = { kind: "root", id: "root", name: "Registry", parent: null, kids: new Map(), sortedKids: null };
 tree.byId.set("root", tree.root);
 tree.names = [];
-try { cfg = await api("/api/config"); $("reg").textContent = cfg.registry; banner(notice()); } catch (e) { banner(e.message, true); }
+try { cfg = await api("/api/config"); $("reg").textContent = cfg.registry; $("ver").textContent = `v${cfg.version} · ${cfg.revision.slice(0, 7)}`; banner(notice()); } catch (e) { banner(e.message, true); }
 expanded.add("root");
 await sync();
 addEventListener("hashchange", () => void navigate());

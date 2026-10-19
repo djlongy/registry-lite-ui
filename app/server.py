@@ -59,6 +59,8 @@ class Config:
         password = Path(pw_file).read_text().strip() if pw_file else env.get("REGISTRY_PASSWORD", "")
         self.client = R.Client(self.registry_url, env.get("REGISTRY_USER", ""), password,
                               env.get("REGISTRY_CA_FILE") or None)
+        self.version = env.get("APP_VERSION", "dev")[:64]  # baked into the image at build time, shown in the header
+        self.revision = env.get("APP_REVISION", "unknown")[:40]
         self.readonly = env.get("UI_READONLY", "").lower() in ("1", "true", "yes")
         stages = [e.strip() for e in (env.get("UI_ENVIRONMENTS") or DEFAULT_ENVIRONMENTS).split(",") if e.strip()]
         self.environments = list(dict.fromkeys(stages))  # in lifecycle order, each a path prefix such as prod or team-a/prod
@@ -245,7 +247,8 @@ def routes(cfg):
         "/api/config": lambda q: {"csrf": cfg.csrf, "readonly": cfg.readonly, "deleteEnabled": c.delete_enabled(),
                                   "registry": cfg.registry_url,
                                   "registryHost": cfg.registry_host or urllib.parse.urlsplit(cfg.registry_url).netloc,
-                                  "registryHostSet": bool(cfg.registry_host), "environments": cfg.environments, "registryStorage": cfg.registry_storage},
+                                  "registryHostSet": bool(cfg.registry_host), "environments": cfg.environments, "registryStorage": cfg.registry_storage,
+                                  "version": cfg.version, "revision": cfg.revision},
         "/api/repos": lambda q: sorted(c.catalog()),
         "/api/tags": tags,
         "/api/recent": recent,

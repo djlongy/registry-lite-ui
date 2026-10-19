@@ -2,13 +2,12 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
 permissions:
   contents: read
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}  # a release run on main is never cancelled
 env:
   IMAGE: ghcr.io/djlongy/registry-lite-ui
 jobs:
@@ -18,6 +17,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: python3 -m unittest discover -s tests -p 'unit_test.py' -v
+      - name: Check VERSION and the release decision
+        run: |
+          .github/scripts/release.sh check "$(cat VERSION)"
+          tests/release.sh
       - name: Simulate a checkout made under umask 077
         run: chmod -R go-rwx app
       - name: Build amd64 and arm64 with buildah
@@ -25,7 +28,7 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
           # docker format keeps HEALTHCHECK, which the OCI format drops
           for a in amd64 arm64; do
-            buildah build --format docker --platform linux/$a -t localhost/ui:$a -f Containerfile .
+            buildah build --format docker --platform linux/$a --build-arg APP_VERSION="$(cat VERSION)" --build-arg APP_REVISION="$GITHUB_SHA" -t localhost/ui:$a -f Containerfile .
           done
       - name: Smoke test with podman
         run: |
@@ -42,6 +45,7 @@ jobs:
           curl -fs 'localhost:8080/api/tags?repo=ci/busybox' | grep -q '"tag": "1"'
           podman logs ui
           podman healthcheck run ui
+          curl -fs localhost:8080/api/config | jq -e --arg v "$(cat VERSION)" --arg r "$GITHUB_SHA" '.version == $v and .revision == $r'
       - name: Export one archive per platform
         if: github.event_name == 'push'
         run: |
@@ -55,20 +59,32 @@ jobs:
           retention-days: 1
 
   publish:
-    timeout-minutes: 15
     if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # contents: write creates the release tag and the GitHub Release, packages: write pushes the image
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: image
+      - name: Decide whether this push is a release
+        id: decide
+        run: |
+          version=$(cat VERSION)
+          exists=false
+          git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1 && exists=true
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          .github/scripts/release.sh decide "$version" "$exists" | tee -a "$GITHUB_OUTPUT"
       - name: Push the manifest list to ghcr.io
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE: ${{ steps.decide.outputs.release }}
+          VERSION: ${{ steps.decide.outputs.version }}
         run: |
           printf %s "$GH_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           # copying the archives straight to the registry keeps the config blob, and with it the HEALTHCHECK
@@ -77,9 +93,10 @@ jobs:
             skopeo copy --format v2s2 docker-archive:ui-$a.tar "docker://$IMAGE:$GITHUB_SHA-$a"
             podman manifest add ui "docker://$IMAGE:$GITHUB_SHA-$a"
           done
+          # latest moves with main only; a release adds X.Y.Z and X.Y
           tags=("$GITHUB_SHA")
           [ "$GITHUB_REF" = refs/heads/main ] && tags+=(latest)
-          [ "$GITHUB_REF_TYPE" = tag ] && tags+=("${GITHUB_REF_NAME#v}")
+          if [ "$RELEASE" = true ]; then tags+=("$VERSION" "${VERSION%.*}"); fi
           for t in "${tags[@]}"; do podman manifest push --format v2s2 ui "docker://$IMAGE:$t"; done
           skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | grep -E '"architecture"'
           # skopeo inspect --config hides the field, so read the config blob itself
@@ -87,9 +104,28 @@ jobs:
           grep -lq Healthcheck check/*
           skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | sha256sum
       - name: Run the pushed image
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
         run: |
           podman run -d --name ui -p 8080:8080 --read-only -v ui-state:/state \
             -e REGISTRY_URL=http://127.0.0.1:5000 -e UI_STATE_DIR=/state "$IMAGE:$GITHUB_SHA"
           for i in $(seq 30); do curl -fs localhost:8080/healthz && break; sleep 1; done
           curl -fs localhost:8080/healthz
+          curl -fs localhost:8080/api/config | jq -e --arg v "$VERSION" '.version == $v'
           podman image inspect "$IMAGE:$GITHUB_SHA" --format '{{.Digest}} {{.Architecture}}'
+      - name: Tag the release and create the GitHub Release
+        if: steps.decide.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          raw=$(skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA")
+          {
+            cat RELEASE_NOTES.md
+            printf '\n## Image\n\n`%s:%s` (also `%s`), linux/amd64 and linux/arm64, uid 65534.\n\n' "$IMAGE" "$VERSION" "${VERSION%.*}"
+            printf 'Manifest list: `%s@sha256:%s`\n\n' "$IMAGE" "$(printf %s "$raw" | sha256sum | cut -d' ' -f1)"
+            printf %s "$raw" | jq -r '.manifests[] | "- \(.platform.os)/\(.platform.architecture): `\(.digest)`"'
+          } > notes.md
+          git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com tag -a "v$VERSION" -m "registry-lite-ui $VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/v$VERSION"
+          gh release create "v$VERSION" --verify-tag --title "registry-lite-ui $VERSION" --notes-file notes.md

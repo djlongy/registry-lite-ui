@@ -833,6 +833,10 @@ class Routes(unittest.TestCase):
         self.assertTrue(host({"UI_REGISTRY_HOST": "docker.example.internal:5000"})["registryHostSet"])
         fallback = host({"REGISTRY_URL": "https://registry.example:5443"})
         self.assertEqual((fallback["registryHost"], fallback["registryHostSet"]), ("registry.example:5443", False))
+        # the version and revision baked into the image, with dev defaults for a plain checkout
+        self.assertEqual((host({})["version"], host({})["revision"]), ("dev", "unknown"))
+        built = host({"APP_VERSION": "1.2.3", "APP_REVISION": "abc1234def"})
+        self.assertEqual((built["version"], built["revision"]), ("1.2.3", "abc1234def"))
         for bad in ("https://x:5000", "x/y", "x y", "x:5000/"):
             with self.assertRaises(ValueError):
                 S.Config({"UI_REGISTRY_HOST": bad})
