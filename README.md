@@ -22,6 +22,8 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 |---|---|---|---|
 | Required | `REGISTRY_URL` | `http://registry:5000` | The only host the UI talks to. Fixed at start, never taken from a request. |
 | When registry has basic auth | `REGISTRY_USER`, `REGISTRY_PASSWORD_FILE` | empty | Credentials for the registry. Use the file form, `REGISTRY_PASSWORD` also works. |
+| When registry is HTTPS | `REGISTRY_CA_FILE` | system store | CA bundle, or the self-signed certificate itself, that the UI trusts for `REGISTRY_URL`. Verification stays on. |
+| When UI serves HTTPS | `UI_TLS_CERT`, `UI_TLS_KEY` | empty | Certificate and key files for the UI's own listener (TLS 1.2 or newer). Both or neither. |
 | Optional | `UI_READONLY` | `false` | Hides and refuses copy, move and delete. |
 | Optional | `UI_ALLOWED_HOSTS` | any | Comma separated `Host` allowlist, a DNS rebinding guard. |
 | Optional | `UI_PORT` / `REGISTRY_PORT` | `8080` / `5000` | Host ports in `compose.yml`. |
@@ -40,6 +42,7 @@ Set on the `ui` service in `compose.yml`. The parser is `Config` in `app/server.
 | `app/static/` | About 150 lines of vanilla HTML, CSS and JS with no build step. Data is rendered with `textContent`, never `innerHTML`. |
 | `Dockerfile` | `python:3.13-slim` pinned by digest, uid 65534, no pip installs. |
 | `compose.basic.yml`, `compose.oidc.yml`, `compose.ldap.yml` | Optional auth in front of the UI only, using stock `nginx-unprivileged`, `oauth2-proxy` and `dex`. |
+| `compose.tls.yml`, `compose.basic-tls.yml`, `compose.oidc-tls.yml` | Optional HTTPS from an existing certificate, for the registry, the UI or the auth proxy. `server_context` in `app/server.py` sets up the TLS 1.2+ listener. |
 
 Stdlib Python was chosen over static nginx plus browser JS because copy and move need a server that can mount blobs and replay manifests byte for byte, and a browser would need CORS on the registry or an nginx proxy of `/v2/`. A Python process has no build step and no dependencies to audit.
 
@@ -98,6 +101,38 @@ Off by default. Each option is an override file and removes the UI's direct port
 | LDAP | `-f compose.yml -f compose.oidc.yml -f compose.ldap.yml`. dex with its LDAP connector is the OIDC provider. Edit `auth/dex-ldap.yaml`. |
 | Registry's own basic auth | `-f compose.registry-auth.yml` with `REGISTRY_USER` set and the password in `secrets/registry_password`. |
 
+## TLS
+
+Simplest case, the registry already serves HTTPS with a self-signed certificate: mount that certificate and point the UI at it.
+
+```yaml
+    environment:
+      REGISTRY_URL: https://docker.example.internal:5000
+      REGISTRY_CA_FILE: /run/certs/registry-ca.pem
+    volumes: ["/etc/pki/registry/tls.crt:/run/certs/registry-ca.pem:ro"]
+```
+
+`app/registry.py` builds one `ssl.create_default_context(cafile=...)` for the registry client. A self-signed leaf works as its own CA, but its subjectAltName must contain the name in `REGISTRY_URL`, because Python ignores the CN. A failed check names the cause (untrusted, or name not in the SAN). There is no `REGISTRY_TLS_VERIFY=false`: the CA file covers self-signed certificates, so an off switch would only add a way to disable the check.
+
+To serve the UI over HTTPS with the same certificate, and optionally put TLS on the registry from the same files, use `compose.tls.yml`:
+
+```sh
+cat > .env <<'EOT'
+REGISTRY_HOST=docker.example.internal
+TLS_CERT=/etc/pki/registry/tls.crt
+TLS_KEY=/etc/pki/registry/tls.key
+UI_TLS_KEY=/etc/pki/registry/ui.key
+EOT
+install -m 0440 -g 65534 /etc/pki/registry/tls.key /etc/pki/registry/ui.key   # as root
+docker compose -f compose.yml -f compose.tls.yml up -d
+```
+
+- The registry (root in its image) reads `TLS_KEY` itself and stays on 5000. If it already has `REGISTRY_HTTP_TLS_CERTIFICATE` and `REGISTRY_HTTP_TLS_KEY` of its own, remove that block from the file and keep the `ui` part.
+- The UI runs as uid 65534 and cannot read a root-only key. Give it a copy with group 65534 and mode 0440 (`UI_TLS_KEY`), or a podman secret created with `--uid 65534 --mode 0440`. The host key keeps its mode.
+- `registry` gets a network alias `REGISTRY_HOST`, so the UI reaches it by the certificate name inside the compose network.
+- With an auth override, TLS goes on the proxy with the same files: add `compose.basic-tls.yml` after `compose.basic.yml`, or `compose.oidc-tls.yml` after `compose.oidc.yml`. The UI behind the proxy stays plain HTTP on the internal network.
+- docker does not verify loopback registries. Test with the certificate name, and trust the certificate in `/etc/docker/certs.d/<host:port>/ca.crt` (skopeo: `--cert-dir`).
+
 ## Podman
 
 The compose file runs under `podman-compose` (`!reset` in the auth overrides needs 1.2 or newer). For a systemd service on a VM, either `podman-compose systemd -a create-unit` and `systemctl --user enable --now podman-compose@registry-lite-ui`, or write Quadlet `.container` files for `registry` (`PublishPort=5000:5000`, `Volume=registry-data:/var/lib/registry`, `Environment=REGISTRY_STORAGE_DELETE_ENABLED=true`) and `ui` (`Image` built from `Dockerfile`, `PublishPort=8080:8080`, `Environment=REGISTRY_URL=http://registry:5000`, `ReadOnly=true`, `DropCapability=ALL`, `Network` shared with the registry).
@@ -109,8 +144,9 @@ The compose file runs under `podman-compose` (`!reset` in the auth overrides nee
 - **CSRF.** Mutations need `Content-Type: application/json` (forces a CORS preflight), a per-process `X-CSRF-Token`, and an `Origin` that matches `Host`.
 - **Input.** Repository, tag and digest are matched against the distribution spec before use. Registry `Location` and `Link` values keep only their path, so a registry response cannot redirect the UI elsewhere. Redirects are not followed.
 - **Browser.** CSP is `default-src 'none'` with same-origin script and style only, plus `nosniff`, `no-referrer`, `frame-ancestors 'none'`.
-- **Not covered.** No TLS (put it on a trusted network or behind your own terminator), no audit log beyond the access line per request, no per-user authorisation, no token-auth registries.
+- **TLS.** The registry client always verifies the certificate. The UI listener is HTTP unless `UI_TLS_CERT` and `UI_TLS_KEY` are set, and it never serves both on one port.
+- **Not covered.** No audit log beyond the access line per request, no per-user authorisation, no token-auth registries.
 
 ## Tests
 
-`python3 -m unittest discover -s tests -p 'unit_test.py'` covers names, copy ordering and CSRF. `tests/e2e.sh` runs the compose checks and `tests/oidc.sh` the dex login. Output from the last runs is in `tests/evidence/`: push and pull with the UI up and down, copy, move, delete, GC (a 19 MiB volume reduction), basic auth, registry auth and OIDC. The LDAP override and the stream fallback for refused blob mounts have no live test.
+`python3 -m unittest discover -s tests -p 'unit_test.py'` covers names, copy ordering and CSRF. `tests/e2e.sh` runs the compose checks and `tests/oidc.sh` the dex login, `tests/tls.sh` the throwaway-certificate checks. Output from the last runs is in `tests/evidence/`: push and pull with the UI up and down, copy, move, delete, GC (a 19 MiB volume reduction), basic auth, registry auth and OIDC. The LDAP override, the OIDC TLS override (config renders only) and the stream fallback for refused blob mounts have no live test.

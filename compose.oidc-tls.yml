@@ -1,0 +1,15 @@
+# Use after compose.tls.yml and compose.oidc.yml. oauth2-proxy serves HTTPS with the same certificate, the UI behind it is plain HTTP.
+services:
+  ui:
+    environment:
+      UI_TLS_CERT: ""
+      UI_TLS_KEY: ""
+  ui-auth:
+    environment:
+      OAUTH2_PROXY_HTTP_ADDRESS: ""
+      OAUTH2_PROXY_HTTPS_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_TLS_CERT_FILE: /certs/tls.crt
+      OAUTH2_PROXY_TLS_KEY_FILE: /certs/tls.key
+    volumes:
+      - ${TLS_CERT}:/certs/tls.crt:ro
+      - ${UI_TLS_KEY}:/certs/tls.key:ro

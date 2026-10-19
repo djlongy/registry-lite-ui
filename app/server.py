@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import secrets
+import ssl
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,10 +22,19 @@ class Config:
         self.registry_url = env.get("REGISTRY_URL", "http://registry:5000")
         pw_file = env.get("REGISTRY_PASSWORD_FILE")
         password = Path(pw_file).read_text().strip() if pw_file else env.get("REGISTRY_PASSWORD", "")
-        self.client = R.Client(self.registry_url, env.get("REGISTRY_USER", ""), password)
+        self.client = R.Client(self.registry_url, env.get("REGISTRY_USER", ""), password,
+                              env.get("REGISTRY_CA_FILE") or None)
         self.readonly = env.get("UI_READONLY", "").lower() in ("1", "true", "yes")
         self.hosts = {h.strip() for h in env.get("UI_ALLOWED_HOSTS", "").split(",") if h.strip()}
         self.csrf = hmac.new(secrets.token_bytes(32), b"csrf", hashlib.sha256).hexdigest()
+
+
+def server_context(cert, key):
+    """TLS context for the UI's own listener: TLS 1.2 or newer, cert and key read from mounted files."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(cert, key)
+    return ctx
 
 
 def csrf_ok(cfg, headers):
@@ -83,6 +93,7 @@ def make_handler(cfg):
     class Handler(BaseHTTPRequestHandler):
         server_version = "registry-lite-ui"
         sys_version = ""
+        timeout = 30
 
         def send(self, status, body, ctype="application/json"):
             self.send_response(status)
@@ -136,4 +147,11 @@ def make_handler(cfg):
 
 if __name__ == "__main__":
     cfg = Config(os.environ)
-    ThreadingHTTPServer((os.environ.get("UI_BIND", "0.0.0.0"), int(os.environ.get("UI_PORT", "8080"))), make_handler(cfg)).serve_forever()
+    httpd = ThreadingHTTPServer((os.environ.get("UI_BIND", "0.0.0.0"), int(os.environ.get("UI_PORT", "8080"))), make_handler(cfg))
+    cert, key = os.environ.get("UI_TLS_CERT"), os.environ.get("UI_TLS_KEY")
+    if bool(cert) != bool(key):
+        sys.exit("UI_TLS_CERT and UI_TLS_KEY must be set together")
+    if cert:
+        # handshake in the worker thread, so a stalled client cannot block accept()
+        httpd.socket = server_context(cert, key).wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
+    httpd.serve_forever()

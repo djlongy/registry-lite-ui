@@ -1,0 +1,55 @@
+== registry and UI both on HTTPS, certificate used as the CA
+-- registry
+PASS registry answers HTTPS with the CA
+PASS registry refuses plain HTTP
+PASS registry HTTPS fails without the CA
+PASS skopeo push fails without the CA
+PASS skopeo push multi-arch with --cert-dir
+PASS skopeo push single-arch with --cert-dir
+PASS skopeo pull with --cert-dir
+PASS docker push fails verification before the CA is installed
+PASS docker push with certs.d
+PASS docker pull with certs.d
+-- UI serves HTTPS
+PASS UI answers HTTPS with the CA
+PASS UI refuses plain HTTP
+-- UI to registry over verified TLS: browse, copy, move, delete
+clients PASS count: 10
+== UI operations
+PASS catalog lists lib/busybox
+PASS tag list
+PASS manifest detail shows platforms of an index
+PASS manifest detail shows layers and platform of an image
+-- copy keeps the digest
+PASS index copy: digest identical
+PASS index copy: child platform inspectable
+PASS image copy: digest identical
+PASS image copy: docker pull
+PASS same-repo retag: digest identical
+-- move
+PASS move: destination has the digest, source gone
+PASS move: moved image pullable
+-- delete
+PASS delete: index gone
+PASS delete with children: no child manifest left
+PASS delete: source repo copy untouched
+-- guards
+PASS POST without CSRF token: 403
+PASS POST from foreign Origin: 403
+PASS POST as text/plain: 403
+PASS invalid source name rejected
+PASS uppercase destination rejected
+PASS CSP header set
+failures: 0
+-- UI refuses an untrusted or mismatched registry certificate
+no CA: {"error": "registry TLS verification failed: self-signed certificate. Mount the registry certificate or its CA and set REGISTRY_CA_FILE."}
+PASS no CA: verify failure with a clear message
+name not in SAN: {"error": "registry TLS verification failed: Hostname mismatch, certificate is not valid for 'registry'. The certificate needs a subjectAltName entry for the host in REGISTRY_URL, a CN alone is ignored."}
+PASS name not in SAN: message names the SAN
+== basic auth proxy with TLS in front of a plain-HTTP UI
+PASS proxy HTTPS without credentials: 401
+PASS proxy HTTPS with credentials: 200
+PASS proxy refuses plain HTTP
+== rendered config for the OIDC TLS override (not started)
+PASS compose.oidc-tls.yml renders
+failures: 0

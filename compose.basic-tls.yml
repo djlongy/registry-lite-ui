@@ -1,0 +1,11 @@
+# Use after compose.tls.yml and compose.basic.yml. nginx serves HTTPS with the same certificate, the UI behind it is plain HTTP.
+services:
+  ui:
+    environment:
+      UI_TLS_CERT: ""
+      UI_TLS_KEY: ""
+  ui-auth:
+    volumes:
+      - ./auth/nginx-basic-tls.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${TLS_CERT}:/certs/tls.crt:ro
+      - ${UI_TLS_KEY}:/certs/tls.key:ro

@@ -2,6 +2,7 @@
 import base64
 import json
 import re
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,10 +49,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
-    def __init__(self, base, user="", password=""):
+    def __init__(self, base, user="", password="", cafile=None):
         self.base = base.rstrip("/")
         self.auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode() if user else ""
-        self.opener = urllib.request.build_opener(NoRedirect)
+        # Verification is always on. cafile may be a CA or the self-signed leaf itself.
+        tls = urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=cafile))
+        self.opener = urllib.request.build_opener(NoRedirect, tls)
 
     def open(self, method, path, headers=None, body=None, timeout=30):
         """Return an open response. path must be a /v2/ path; only it is taken from callers or Location headers."""
@@ -65,7 +68,7 @@ class Client:
         except urllib.error.HTTPError as e:
             return e  # HTTPError is a response too
         except (urllib.error.URLError, OSError) as e:
-            raise RegistryError(502, f"registry unreachable: {e}")
+            raise RegistryError(502, unreachable(e))
 
     def call(self, method, path, headers=None, body=None, ok=(200,)):
         with self.open(method, path, headers, body) as r:
@@ -99,6 +102,16 @@ class Client:
         """DELETE on a digest that cannot exist: 405 means disabled, 404 means enabled."""
         with self.open("DELETE", "/v2/ui-probe/manifests/sha256:" + "0" * 64) as r:
             return r.status != 405
+
+
+def unreachable(e):
+    reason = getattr(e, "reason", e)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        hint = " The certificate needs a subjectAltName entry for the host in REGISTRY_URL, a CN alone is ignored." \
+            if "mismatch" in str(reason.verify_message).lower() or "IP address" in str(reason.verify_message) else \
+            " Mount the registry certificate or its CA and set REGISTRY_CA_FILE."
+        return f"registry TLS verification failed: {reason.verify_message.rstrip(".")}.{hint}"
+    return f"registry unreachable: {reason}"
 
 
 def local_path(url):

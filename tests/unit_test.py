@@ -1,5 +1,11 @@
+import http.server
 import os
+import shutil
+import ssl
+import subprocess
 import sys
+import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
@@ -97,6 +103,47 @@ class Paths(unittest.TestCase):
     def test_non_v2_path_refused(self):
         with self.assertRaises(R.RegistryError):
             R.Client("http://registry:5000").open("GET", "/admin")
+
+
+def make_cert(d, san):
+    """Self-signed cert for the given subjectAltName, written to d. Returns (cert, key)."""
+    cert, key = os.path.join(d, "c.pem"), os.path.join(d, "k.pem")
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=test",
+                    "-addext", f"subjectAltName={san}", "-keyout", key, "-out", cert], check=True, capture_output=True)
+    return cert, key
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl not installed")
+class Tls(unittest.TestCase):
+    def serve(self, san):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        cert, key = make_cert(d, san)
+        ctx = S.server_context(cert, key)
+        self.assertEqual(ctx.minimum_version, ssl.TLSVersion.TLSv1_2)
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), S.make_handler(S.Config({})))
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return cert, httpd.server_address[1]
+
+    def test_leaf_as_ca_is_trusted(self):
+        cert, port = self.serve("DNS:localhost")
+        c = R.Client(f"https://localhost:{port}", cafile=cert)
+        self.assertEqual(c.call("GET", "/v2/x", ok=(404,))[0], 404)  # the UI answers 404 for unknown paths
+
+    def test_without_ca_is_refused(self):
+        cert, port = self.serve("DNS:localhost")
+        with self.assertRaises(R.RegistryError) as e:
+            R.Client(f"https://localhost:{port}").call("GET", "/v2/x")
+        self.assertIn("TLS verification failed", e.exception.message)
+
+    def test_name_not_in_san_says_so(self):
+        cert, port = self.serve("DNS:other.example.internal")
+        with self.assertRaises(R.RegistryError) as e:
+            R.Client(f"https://localhost:{port}", cafile=cert).call("GET", "/v2/x")
+        self.assertIn("subjectAltName", e.exception.message)
 
 
 if __name__ == "__main__":

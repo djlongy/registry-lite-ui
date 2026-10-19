@@ -5,7 +5,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 SRC=${SRC_REPO:-mirror.gcr.io/library}  # source images; a mirror of Docker Hub avoids its pull rate limit
 REG=localhost:${REGISTRY_PORT:-5000}
-UI=http://localhost:${UI_PORT:-8080}
+UI=${UI_SCHEME:-http}://localhost:${UI_PORT:-8080}
 WORK=$(mktemp -d)
 trap 'find "$WORK" -delete' EXIT
 fails=0

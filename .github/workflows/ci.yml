@@ -21,3 +21,7 @@ jobs:
           curl -fs localhost:8080/api/repos | grep -q ci/busybox
           curl -fs 'localhost:8080/api/tags?repo=ci/busybox' | grep -q '"tag": "1"'
           docker compose down -v
+      - name: TLS test
+        run: |
+          command -v skopeo || sudo apt-get install -y skopeo
+          tests/tls.sh
