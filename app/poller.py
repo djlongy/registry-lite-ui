@@ -63,6 +63,7 @@ class State:
         self.since = clock()
         self.cond = threading.Condition()
         self.saved, self.saved_at, self.dirty = None, 0, False
+        self.write_lock = threading.Lock()  # the poller and the SIGTERM path both save
         if path:
             self.load()
 
@@ -116,6 +117,10 @@ class State:
 
     def save(self, force=False):
         """Write the state atomically, only if it changed and not more often than save_every."""
+        with self.write_lock:
+            self.write(force)
+
+    def write(self, force):
         if not self.path or not (self.dirty or force):
             return
         if not force and self.clock() - self.saved_at < self.save_every:

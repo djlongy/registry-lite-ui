@@ -694,6 +694,10 @@ class Routes(unittest.TestCase):
         img = S.view_manifest(self.cfg.client, "a/app", D("b"))
         self.assertEqual((img["platform"], len(img["layers"])), ({"os": "linux", "architecture": "arm64"}, 1))
 
+    def test_children_must_be_a_json_boolean(self):
+        out = self.post["/api/delete"]({"repo": "a/app", "digest": D("a"), "children": "false"})
+        self.assertEqual(out["deleted"], [D("a")])  # the string "false" is not true
+
     def test_writes_wake_the_poller(self):
         woken = []
         self.cfg.poller = type("Poller", (), {"wake": lambda self: woken.append(1)})()

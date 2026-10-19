@@ -1,6 +1,7 @@
 issuer: https://dex.example.internal/dex
 storage: {type: memory}
-web: {http: 0.0.0.0:5556}
+web: {https: 0.0.0.0:5556, tlsCert: /certs/tls.crt, tlsKey: /certs/tls.key}
+expandEnv: true
 staticClients:
   - id: registry-ui
     name: registry-ui
@@ -13,7 +14,7 @@ connectors:
     config:
       host: ldap.example.internal:636
       bindDN: cn=svc-dex,ou=services,dc=example,dc=internal
-      bindPW: change-me
+      bindPW: $LDAP_BIND_PW  # from the environment, never in this file
       userSearch:
         baseDN: ou=people,dc=example,dc=internal
         filter: "(objectClass=person)"

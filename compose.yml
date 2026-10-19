@@ -48,12 +48,16 @@ services:
     image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
     command: registry garbage-collect /etc/docker/registry/config.yml
     volumes: [registry-data:/var/lib/registry]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
   gc-dry:
     profiles: [gc]
     image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
     command: registry garbage-collect --dry-run /etc/docker/registry/config.yml
     volumes: [registry-data:/var/lib/registry:ro]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
 volumes:
   registry-data:

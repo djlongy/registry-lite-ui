@@ -1,5 +1,6 @@
 # LDAP login: dex with its LDAP connector as the OIDC provider for compose.oidc.yml.
 # Use with both: -f compose.yml -f compose.oidc.yml -f compose.ldap.yml
+# dex serves HTTPS with TLS_CERT and a readable copy of the key (DEX_TLS_KEY); LDAP passwords go through it.
 # Set OIDC_ISSUER_URL to the public URL of dex, for example https://dex.example.internal/dex
 x-logging: &logging
   driver: json-file
@@ -10,7 +11,12 @@ services:
     image: dexidp/dex:v2.46.0@sha256:933fcd3f523338c847b88ef84a7145fb2fcb7b9917f08418612afeaaa2001777
     command: dex serve /etc/dex/config.yaml
     ports: ["5556:5556"]
-    volumes: [./auth/dex-ldap.yaml:/etc/dex/config.yaml:ro]
+    environment:
+      LDAP_BIND_PW: ${LDAP_BIND_PW:?set LDAP_BIND_PW, the password of the dex bind account}
+    volumes:
+      - ./auth/dex-ldap.yaml:/etc/dex/config.yaml:ro
+      - ${TLS_CERT:?set TLS_CERT, dex serves HTTPS because LDAP passwords pass through it}:/certs/tls.crt:ro
+      - ${DEX_TLS_KEY:?set DEX_TLS_KEY, a copy of the key readable by the dex user}:/certs/tls.key:ro
     logging: *logging
     mem_limit: 128m
     pids_limit: 64

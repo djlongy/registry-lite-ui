@@ -114,7 +114,7 @@ Off by default. Each option is an override file and removes the UI's direct port
 |---|---|
 | Basic | `htpasswd -B -c auth/htpasswd admin`, set `UI_ALLOWED_HOSTS`, then `docker compose -f compose.yml -f compose.basic.yml up -d` |
 | OIDC | Set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_COOKIE_SECRET`, `OIDC_REDIRECT_URL`, `OIDC_EMAIL_DOMAINS` (no default, `*` admits every account the issuer vouches for) and `UI_ALLOWED_HOSTS` in `.env`, optionally `OIDC_ALLOWED_GROUPS`, then `-f compose.yml -f compose.oidc.yml`. oauth2-proxy does all OIDC work. |
-| LDAP | `-f compose.yml -f compose.oidc.yml -f compose.ldap.yml`. dex with its LDAP connector is the OIDC provider. Edit `auth/dex-ldap.yaml`. |
+| LDAP | `-f compose.yml -f compose.oidc.yml -f compose.ldap.yml`. dex with its LDAP connector is the OIDC provider and serves HTTPS with `TLS_CERT` and `DEX_TLS_KEY`; set `LDAP_BIND_PW`. Edit `auth/dex-ldap.yaml`. Restrict who may log in with the LDAP filter and `OIDC_ALLOWED_GROUPS`. |
 | Registry's own basic auth | `-f compose.registry-auth.yml` with `REGISTRY_USER` set and the password in `secrets/registry_password`. |
 
 ## TLS
@@ -144,6 +144,7 @@ docker compose -f compose.yml -f compose.tls.yml up -d
 ```
 
 - The registry (root in its image) reads `TLS_KEY` itself and stays on 5000. If it already has `REGISTRY_HTTP_TLS_CERTIFICATE` and `REGISTRY_HTTP_TLS_KEY` of its own, remove that block from the file and keep the `ui` part.
+- The nginx and oauth2-proxy images do not run as 65534 (nginx-unprivileged is uid 101): for the auth TLS overrides make the `UI_TLS_KEY` copy readable by that group instead (`-g 101` for nginx), or the proxy cannot start.
 - The UI runs as uid 65534 and cannot read a root-only key. Give it a copy with group 65534 and mode 0440 (`UI_TLS_KEY`), or a podman secret created with `--uid 65534 --mode 0440`. The host key keeps its mode.
 - `registry` gets a network alias `REGISTRY_HOST`, so the UI reaches it by the certificate name inside the compose network.
 - With an auth override, TLS goes on the proxy with the same files: add `compose.basic-tls.yml` after `compose.basic.yml`, or `compose.oidc-tls.yml` after `compose.oidc.yml`. The UI behind the proxy stays plain HTTP on the internal network.

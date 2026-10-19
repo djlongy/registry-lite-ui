@@ -172,7 +172,7 @@ def routes(cfg):
         return run
 
     def delete(b):
-        out = {"deleted": R.delete(c, str(b["repo"]), str(b["digest"]), bool(b.get("children")))}
+        out = {"deleted": R.delete(c, str(b["repo"]), str(b["digest"]), b.get("children", False) is True)}
         if cfg.poller:
             cfg.poller.wake()
         return out
@@ -366,7 +366,9 @@ def main(env):
     cfg.poller = P.Poller(cfg.client, cfg.state, cfg.interval, cfg.max_tags)
     cfg.poller.start()
     threading.Thread(target=watchdog, args=(cfg,), daemon=True, name="watchdog").start()
-    signal.signal(signal.SIGTERM, lambda *a: threading.Thread(target=httpd.shutdown).start())
+    stop = threading.Event()  # a thread started now, since SIGTERM may arrive when no thread can be created
+    threading.Thread(target=lambda: (stop.wait(), httpd.shutdown()), daemon=True, name="stop").start()
+    signal.signal(signal.SIGTERM, lambda *a: stop.set())
     log.info("listening on %s, registry %s, history %s", httpd.server_address[1], cfg.registry_url,
              cfg.state.path or "in memory only")
     try:
