@@ -20,7 +20,7 @@ build:
     BUILDAH_ISOLATION: chroot
     BUILDAH_FORMAT: docker  # keeps HEALTHCHECK, which the OCI format drops
   script:
-    - buildah build ${BASE_IMAGE:+--build-arg "BASE_IMAGE=$BASE_IMAGE"} -f Containerfile -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - buildah build ${BASE_IMAGE:+--build-arg "BASE_IMAGE=$BASE_IMAGE"} --build-arg "APP_VERSION=$(cat VERSION)" --build-arg "APP_REVISION=$CI_COMMIT_SHA" -f Containerfile -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
     - |
       tags=""
       [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ] && tags="$tags latest"
