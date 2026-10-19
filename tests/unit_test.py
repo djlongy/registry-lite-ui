@@ -506,9 +506,9 @@ class ChildOfAnIndex(unittest.TestCase):
         return C()
 
     def test_delete_of_a_child_is_refused_with_409(self):
-        c = self.client()
+        c, child = self.client(), D("b")
         with self.assertRaises(R.RegistryError) as e:
-            R.delete(c, "test/busybox", D("b"))
+            R.delete(c, "test/busybox", child)
         self.assertEqual(e.exception.status, 409)
         self.assertIn("1.36", e.exception.message)
         self.assertEqual([m for m, _ in c.calls if m == "DELETE"], [])
