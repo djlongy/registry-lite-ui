@@ -4,6 +4,11 @@ registry-lite-ui is a web UI for a plain `registry:2` that browses, copies, move
 
 `podman-compose up -d` with `compose.yml` (registry and UI), or `podman-compose -f compose.ui.yml up -d` with `REGISTRY_URL` set for a registry that already runs. `docker compose` works the same way. Pin `UI_IMAGE` to a version or a digest in your `.env`.
 
+## Changes in 0.1.1
+
+- With the OIDC or LDAP override, anyone may browse without logging in. The header has a Log in button, and Copy to..., Move to... and Delete appear only after login. The UI refuses a change without a logged-in user (401), and oauth2-proxy refuses it first.
+- OIDC logins use PKCE (S256).
+
 ## Features
 
 - Tree browser of repositories and tags, with manifest detail (digest, size, layers, platforms of an index), Helm charts and a Created column.
