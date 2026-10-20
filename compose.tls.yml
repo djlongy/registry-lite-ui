@@ -1,8 +1,9 @@
 # TLS, reusing a certificate that already exists on the host. Set in .env:
 #   TLS_CERT       host path of the certificate (full chain), also used as the CA the UI trusts
-#   TLS_KEY        host path of the key, mounted into the registry only (it runs as root)
-#   UI_TLS_KEY     a copy of the key readable by uid 65534, see README. Required here, but unused when an auth TLS
-#                  override serves the certificate instead; then point it at any readable file such as PROXY_TLS_KEY
+#   TLS_KEY        host path of the key for the registry, readable by uid 65534 (both services run as 65534)
+#   UI_TLS_KEY     host path of the key for the UI, readable by uid 65534, often the same file as TLS_KEY. Required here,
+#                  but unused when an auth TLS override serves the certificate instead; then point it at any readable file
+# The mounts use `z`, a shared SELinux label, because the registry and the UI mount the same files.
 #   REGISTRY_HOST  the name in the certificate, for example docker.example.internal
 services:
   registry:
@@ -10,8 +11,8 @@ services:
       REGISTRY_HTTP_TLS_CERTIFICATE: /certs/tls.crt
       REGISTRY_HTTP_TLS_KEY: /certs/tls.key
     volumes:
-      - ${TLS_CERT:?set TLS_CERT}:/certs/tls.crt:ro
-      - ${TLS_KEY:?set TLS_KEY}:/certs/tls.key:ro
+      - ${TLS_CERT:?set TLS_CERT}:/certs/tls.crt:ro,z
+      - ${TLS_KEY:?set TLS_KEY}:/certs/tls.key:ro,z
     networks:
       default:
         aliases: ["${REGISTRY_HOST:?set REGISTRY_HOST}"]
@@ -22,5 +23,5 @@ services:
       UI_TLS_CERT: /certs/tls.crt
       UI_TLS_KEY: /certs/ui.key
     volumes:
-      - ${TLS_CERT}:/certs/tls.crt:ro
-      - ${UI_TLS_KEY:?set UI_TLS_KEY}:/certs/ui.key:ro
+      - ${TLS_CERT}:/certs/tls.crt:ro,z
+      - ${UI_TLS_KEY:?set UI_TLS_KEY}:/certs/ui.key:ro,z

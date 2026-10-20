@@ -83,7 +83,7 @@ A repository browser in the style of Artifactory: a tree on the left, details on
 | Reference | `ghcr.io/djlongy/registry-lite-ui`, tagged `latest` (main), the commit sha, and `X.Y.Z` and `X.Y` for a release. The header shows the version and the short commit sha |
 | Base | `registry.access.redhat.com/ubi9/python-312-minimal`, pinned by digest, no pip installs |
 | Platforms | `linux/amd64`, `linux/arm64` |
-| Runtime user | uid and gid 65534, read-only root filesystem, `/state` owned by 65534 |
+| Runtime user | uid and gid 65534, read-only root filesystem, `/state` owned by 65534. `compose.yml` runs the registry as 65534:65534 too, see [Shared ownership](#shared-ownership) |
 
 `docker compose up -d` and `podman-compose up -d` pull the prebuilt image. `latest` follows main, so set `UI_IMAGE` in your own `.env` to a version (`ghcr.io/djlongy/registry-lite-ui:0.1.0`) or a digest. To build it yourself:
 
@@ -107,7 +107,7 @@ podman-compose -f compose.ui.yml up -d
 ```
 
 - The mounts use `:ro,z` (shared SELinux label). `:Z` gives the directory a label private to this container, and the registry service that mounts `/data/certs` too would lose access.
-- The UI runs as uid 65534 and needs a readable copy of the key. Rootful: `install -m 0440 -g 65534 /data/keys/registry.key /data/keys/ui.key`. Rootless: uid 65534 in the container is a sub-uid on the host, so create the copy with `install -m 0400 /path/registry.key /data/keys/ui.key && podman unshare chown 65534:65534 /data/keys/ui.key`.
+- The UI runs as uid 65534 and needs a key it can read. Give `/data/certs` and `/data/keys` to 65534 as in [Shared ownership](#shared-ownership).
 - To start at boot, `podman-compose -f compose.ui.yml systemd -a create-unit`, then `systemctl --user enable --now podman-compose@registry-lite-ui`. Quadlet works too, see [Podman](#podman).
 - Rootful on a VM, `/etc/systemd/system/registry-lite-ui.service` (needs `/etc/registry-lite-ui.env` with `REGISTRY_URL` and the other variables, then `systemctl enable --now registry-lite-ui`):
 
@@ -236,23 +236,36 @@ To serve the UI over HTTPS with the same certificate, and optionally put TLS on 
 cat > .env <<'EOT'
 REGISTRY_HOST=docker.example.internal
 TLS_CERT=/etc/pki/registry/tls.crt
-TLS_KEY=/etc/pki/registry/tls.key
+TLS_KEY=/etc/pki/registry/ui.key
 UI_TLS_KEY=/etc/pki/registry/ui.key
 EOT
-install -m 0440 -g 65534 /etc/pki/registry/tls.key /etc/pki/registry/ui.key   # as root
+install -m 0440 -o 65534 -g 65534 /etc/pki/registry/tls.key /etc/pki/registry/ui.key   # as root
 docker compose -f compose.yml -f compose.tls.yml up -d
 ```
 
-- The registry (root in its image) reads `TLS_KEY` itself and stays on 5000. If it already has `REGISTRY_HTTP_TLS_CERTIFICATE` and `REGISTRY_HTTP_TLS_KEY` of its own, remove that block from the file and keep the `registry-lite-ui` part.
+- The registry runs as 65534, like the UI, so `TLS_KEY` and `UI_TLS_KEY` can be the same file owned by 65534. The registry stays on 5000. The mounts use `:z`, which relabels the files with a shared SELinux label. If it already has `REGISTRY_HTTP_TLS_CERTIFICATE` and `REGISTRY_HTTP_TLS_KEY` of its own, remove that block from the file and keep the `registry-lite-ui` part.
 - With an auth TLS override the proxy, not the UI, serves the certificate: set `PROXY_TLS_KEY` to a separate copy of the key that the proxy's group can read (nginx-unprivileged is uid 101, check oauth2-proxy with `docker image inspect`), for example `install -m 0440 -g 101 /etc/pki/registry/tls.key /etc/pki/registry/proxy.key`. `UI_TLS_KEY` is then not used. Group ids belong to whatever host account carries them, so other host services in that group can read the copy; compose `secrets:` with a per-service uid and mode avoid that, and are not wired here.
-- The UI runs as uid 65534 and cannot read a root-only key. Give it a copy with group 65534 and mode 0440 (`UI_TLS_KEY`), or a podman secret created with `--uid 65534 --mode 0440`. The host key keeps its mode.
+- Neither service can read a root-only key. Give them a copy owned by 65534 with mode 0440, or a podman secret created with `--uid 65534 --mode 0440`. The host key keeps its mode.
 - `registry` gets a network alias `REGISTRY_HOST`, so the UI reaches it by the certificate name inside the compose network.
 - With an auth override, TLS goes on the proxy with the same files: add `compose.basic-tls.yml` after `compose.basic.yml`, or `compose.oidc-tls.yml` after `compose.oidc.yml`. The UI behind the proxy stays plain HTTP on the internal network.
 - docker does not verify loopback registries. Test with the certificate name, and trust the certificate in `/etc/docker/certs.d/<host:port>/ca.crt` (skopeo: `--cert-dir`).
 
+## Shared ownership
+
+The `registry:2` image has no `USER` and runs as root (uid 0). `compose.yml` runs it as 65534:65534, the user of the UI image, so both containers read the same files and neither changes their ownership. The image works as that user as long as it can read its config and certificates and write `/var/lib/registry`. The `registry-data` volume is given to 65534 by `registry-init`. For host directories, one command gives everything to 65534:
+
+```sh
+# rootful docker or podman, as root
+chown -R 65534:65534 /data/certs /data/keys /data/registry
+# rootless podman: uid 65534 in the container is a sub-uid on the host
+podman unshare chown -R 65534:65534 /data/certs /data/keys /data/registry
+```
+
+Keep the key at mode 0640 or tighter, for example `chmod 640 /data/keys/*.key`. Under SELinux, mount `/data/certs` and `/data/keys` with `:z` in every service (a shared label, so each keeps access) and `/data/registry` with `:Z` in the registry only (a private label). `compose.tls.yml` and `compose.ui.yml` already use `:z`. To keep the registry data in `/data/registry`, mount it with `${REGISTRY_DATA}:/var/lib/registry:Z` in place of the `registry-data` volume. A rootless user needs the `cpu` cgroup controller delegated for `cpus: 0.5` to start; without it, remove `cpus` from the service.
+
 ## Podman
 
-The compose file runs under `podman-compose` (`!reset` in the auth overrides needs 1.2 or newer). For a systemd service on a VM, either `podman-compose systemd -a create-unit` and `systemctl --user enable --now podman-compose@registry-lite-ui`, or write Quadlet `.container` files for `registry` (`PublishPort=5000:5000`, `Volume=registry-data:/var/lib/registry`, `Environment=REGISTRY_STORAGE_DELETE_ENABLED=true`) and `registry-lite-ui` (`Image` built from `Containerfile`, `PublishPort=8080:8080`, `Environment=REGISTRY_URL=http://registry:5000`, `ReadOnly=true`, `DropCapability=ALL`, `Network` shared with the registry).
+The compose file runs under `podman-compose` (`!reset` in the auth overrides needs 1.2 or newer). For a systemd service on a VM, either `podman-compose systemd -a create-unit` and `systemctl --user enable --now podman-compose@registry-lite-ui`, or write Quadlet `.container` files for `registry` (`User=65534`, `Group=65534`, `PublishPort=5000:5000`, `Volume=registry-data:/var/lib/registry`, `Environment=REGISTRY_STORAGE_DELETE_ENABLED=true`) and `registry-lite-ui` (`Image` built from `Containerfile`, `PublishPort=8080:8080`, `Environment=REGISTRY_URL=http://registry:5000`, `ReadOnly=true`, `DropCapability=ALL`, `Network` shared with the registry).
 
 ## Operations
 
@@ -260,7 +273,7 @@ Built to run unattended for years without a restart.
 
 - **Logs.** Everything goes to stdout and stderr: `docker compose logs -f registry-lite-ui`, `podman logs -f registry-lite-ui`. One line per request (method, path without query, status), no bodies, headers or cookies. A repeating error logs once, then at most every 10 minutes with a count, and once more when it recovers. Poller cycles, health checks and SSE heartbeats are silent. `LOG_LEVEL=debug` adds them.
 - **Rotation.** The app writes to stdout only, so the host rotates it. Docker: set `log-opts` `max-size` and `max-file` in `/etc/docker/daemon.json`. Podman: the default journald driver is rotated by journald (`SystemMaxUse`), or set `log_size_max` in `containers.conf`.
-- **Limits.** The UI has `mem_limit: 128m`, `pids_limit: 128`, `cpus: 0.5`, a read-only root filesystem and no tmpfs. The registry runs with all capabilities dropped except `DAC_READ_SEARCH` (so it can read a TLS key owned by another user) and `no-new-privileges`. The proxies have 64 to 128 MiB and a 16 MiB `/tmp`.
+- **Limits.** The UI has `mem_limit: 128m`, `pids_limit: 128`, `cpus: 0.5`, a read-only root filesystem and no tmpfs. The registry runs as 65534 with all capabilities dropped and `no-new-privileges`. `registry-init` is a one-shot container that runs as root with only `CHOWN` and `DAC_OVERRIDE` to give the data volume to 65534, then exits. The proxies have 64 to 128 MiB and a 16 MiB `/tmp`.
 - **State.** The only file written is `/state/state.json` on the `ui-state` volume: at most `UI_MAX_EVENTS` events no older than `UI_MAX_EVENT_DAYS`, plus one entry per tag in the registry and, per manifest digest, whether it is an index and whether it holds an image, a Helm chart or another artifact (the poller reads each new digest once, so the tree shows the right icon and chevron before anything is opened). It is written to a temporary file and renamed, only when it changed, at most every 30 s and once on SIGTERM. Nothing else is cached.
 - **Connections.** At most `UI_MAX_CONN` connections and `UI_MAX_SSE` live clients, 15 s per socket operation, 10 s for the whole request header, 10 s for a POST body and 10 s to write a response (a reaper closes slower clients), 30 s on every call to the registry. A registry response is read up to 8 MiB, a list follows at most 1000 pages and never the same page twice. Blobs are never held in memory: a refused mount streams the blob in 8 KiB blocks.
 - **Self-healing.** The poller and the request threads catch every exception, back off up to 5 minutes while the registry is down, and resume by themselves. `/healthz` never calls the registry and returns 503 if the poller has stalled, and when the poller shows no progress for `3 * max(UI_POLL_INTERVAL, 300)` seconds (15 minutes by default; each tag checked counts as progress) a watchdog exits the process so `restart: unless-stopped` brings it back. A repository with more tags than `UI_POLL_MAX_TAGS` is walked over several cycles and reported when complete.

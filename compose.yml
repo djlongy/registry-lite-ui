@@ -1,13 +1,28 @@
 # registry:2 is published directly, exactly as before. The UI is a separate service that calls it.
+# Both run as uid and gid 65534, so one chown of the shared host files (README, Shared ownership) suits both.
+# The image itself runs as root; `user:` drops that, and registry-init gives the data volume to 65534.
 services:
+  registry-init:
+    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+    user: "0:0"
+    entrypoint: ["chown", "-R", "65534:65534", "/var/lib/registry"]
+    volumes: [registry-data:/var/lib/registry]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
   registry:
     image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+    user: "65534:65534"
+    depends_on:
+      registry-init:
+        condition: service_completed_successfully
     ports: ["${REGISTRY_PORT:-5000}:5000"]
     environment:
       REGISTRY_STORAGE_DELETE_ENABLED: "true"
     volumes: [registry-data:/var/lib/registry]
     cap_drop: [ALL]
-    cap_add: [DAC_READ_SEARCH]  # reads a TLS key owned by another user; nothing else
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
 
