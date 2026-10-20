@@ -783,6 +783,16 @@ class Http(unittest.TestCase):
         self.assertEqual(status(self.post(port, cfg.csrf, "2")), b"400")  # well formed, but no src/dst keys
         self.assertEqual(status(self.post(port, "wrong", "2")), b"403")
 
+    def test_login_guards_changes(self):
+        status = lambda out: out.split(b"\r\n")[0].split(b" ")[1]  # noqa: E731
+        cfg, port = self.serve()  # no auth proxy: CSRF is the only gate
+        self.assertEqual(status(self.post(port, "wrong", "2")), b"403")
+        cfg, port = self.serve({"UI_LOGIN_URL": "/oauth2/start"})
+        self.assertEqual(status(self.post(port, cfg.csrf, "2")), b"401")  # anonymous
+        self.assertEqual(status(self.post(port, cfg.csrf, "2", extra="X-Forwarded-Email: a@example.internal\r\n")), b"400")  # past the guard
+        self.assertEqual(S.user_of({"X-Forwarded-User": "u1"}), "u1")
+        self.assertEqual(S.user_of({}), "")
+
     def test_headers_and_methods(self):
         srv, port = self.serve()
         out = self.talk(port, b"GET /nope HTTP/1.0\r\nHost: t\r\n\r\n")

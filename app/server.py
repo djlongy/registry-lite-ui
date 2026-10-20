@@ -62,6 +62,8 @@ class Config:
         self.version = env.get("APP_VERSION", "dev")[:64]  # baked into the image at build time, shown in the header
         self.revision = env.get("APP_REVISION", "unknown")[:40]
         self.readonly = env.get("UI_READONLY", "").lower() in ("1", "true", "yes")
+        # Set when an auth proxy is in front: anyone may read, only a logged-in user may change anything.
+        self.login_url, self.logout_url = env.get("UI_LOGIN_URL", ""), env.get("UI_LOGOUT_URL", "")
         stages = [e.strip() for e in (env.get("UI_ENVIRONMENTS") or DEFAULT_ENVIRONMENTS).split(",") if e.strip()]
         self.environments = list(dict.fromkeys(stages))  # in lifecycle order, each a path prefix such as prod or team-a/prod
         if len(self.environments) > MAX_ENVIRONMENTS or not all(R.valid_repo(e) for e in self.environments):
@@ -253,7 +255,7 @@ def routes(cfg):
                                   "registry": cfg.registry_url,
                                   "registryHost": cfg.registry_host or urllib.parse.urlsplit(cfg.registry_url).netloc,
                                   "registryHostSet": bool(cfg.registry_host), "environments": cfg.environments, "registryStorage": cfg.registry_storage,
-                                  "version": cfg.version, "revision": cfg.revision},
+                                  "version": cfg.version, "revision": cfg.revision, "login": cfg.login_url, "logout": cfg.logout_url},
         "/api/repos": lambda q: sorted(c.catalog()),
         "/api/tags": tags,
         "/api/recent": recent,
@@ -267,6 +269,11 @@ def routes(cfg):
         "/api/delete": delete,
     }
     return get, post
+
+
+def user_of(headers):
+    """The user the auth proxy logged in, from the headers oauth2-proxy sets. Empty when anonymous."""
+    return headers.get("X-Forwarded-Email") or headers.get("X-Forwarded-User") or ""
 
 
 def host_only(host):
@@ -352,6 +359,8 @@ class Handler(BaseHTTPRequestHandler):
     def mutate(self, handler):
         if self.cfg.readonly:
             return self.reply(403, {"error": "UI is read-only (UI_READONLY)"})
+        if self.cfg.login_url and not user_of(self.headers):
+            return self.reply(401, {"error": "log in to make changes"})
         if not csrf_ok(self.cfg, self.headers):
             return self.reply(403, {"error": "CSRF check failed"})
         self.reply(200, handler(self.read_json()))
@@ -374,6 +383,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.health()
         if url.path == "/api/events":
             return self.events()
+        if url.path == "/api/config":  # who is logged in comes from this request's headers
+            return self.reply(200, {**self.get[url.path]({}), "user": user_of(self.headers)})
         if url.path in self.get:
             return self.reply(200, self.get[url.path](urllib.parse.parse_qs(url.query)))
         self.reply(404, {"error": "not found"})
