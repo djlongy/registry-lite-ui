@@ -24,6 +24,7 @@ services:
       OAUTH2_PROXY_COOKIE_SAMESITE: lax
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
       # Anyone may browse. POST (copy, move, delete) still needs a session.
       OAUTH2_PROXY_SKIP_AUTH_ROUTES: GET=^/
     mem_limit: 128m
