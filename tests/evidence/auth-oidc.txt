@@ -1,7 +1,11 @@
-no session, API:      302
-no session, page:     302
+no session, API:      200
+no session, page:     200
+no session, user:     {"login":"/oauth2/start?rd=%2F","user":""}
+no session, forged:   ""
+no session, POST:     302
 redirected to IdP:    http://dex:5556/dex/auth/local/login
 after login:          http://localhost:8088/
 with session, API:    200
+with session, user:   "admin@example.internal"
 wrong password:       400
 UI published directly: :0

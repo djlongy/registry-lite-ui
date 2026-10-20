@@ -10,10 +10,14 @@ JAR=$(mktemp)
 R=(--resolve dex:5556:127.0.0.1 -s)
 echo "no session, API:      $(curl "${R[@]}" -o /dev/null -w '%{http_code}' localhost:8088/api/repos)"
 echo "no session, page:     $(curl "${R[@]}" -o /dev/null -w '%{http_code}' localhost:8088/)"
+echo "no session, user:     $(curl "${R[@]}" localhost:8088/api/config | jq -c '{login, user}')"
+echo "no session, forged:   $(curl "${R[@]}" -H 'X-Forwarded-Email: x@example.internal' localhost:8088/api/config | jq -c '.user')"
+echo "no session, POST:     $(curl "${R[@]}" -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' localhost:8088/api/delete)"
 login=$(curl "${R[@]}" -c "$JAR" -b "$JAR" -L -o /dev/null -w '%{url_effective}' 'localhost:8088/oauth2/start?rd=/')
 echo "redirected to IdP:    ${login%%\?*}"
 final=$(curl "${R[@]}" -c "$JAR" -b "$JAR" -L -o /dev/null -w '%{url_effective}' --data-urlencode login=admin@example.internal --data-urlencode password=password "$login")
 echo "after login:          $final"
 echo "with session, API:    $(curl "${R[@]}" -b "$JAR" -o /dev/null -w '%{http_code}' localhost:8088/api/repos)"
+echo "with session, user:   $(curl "${R[@]}" -b "$JAR" localhost:8088/api/config | jq -c '.user')"
 echo "wrong password:       $(curl "${R[@]}" -c "$JAR.2" -b "$JAR.2" -L -o /dev/null -w '%{http_code}' --data-urlencode login=admin@example.internal --data-urlencode password=bad "$login")"
 echo "UI published directly: $(docker compose -f compose.yml -f compose.oidc.yml port registry-lite-ui 8080 2>&1 | head -1)"

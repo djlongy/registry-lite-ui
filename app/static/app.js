@@ -1040,7 +1040,7 @@ function actions(repo, ref, digest) {
     if (v) await run(() => api("/api/delete", { repo, digest, children: v.children }), async () => { await touch(repo); location.hash = "#/repo/" + repo; });
   };
   const b = (text, fn, cls) => el("button", { textContent: text, className: cls || "", onclick: fn });
-  return el("div", { className: "bar" }, ...(cfg.readonly ? [] : [b("Copy to...", copy(false)), b("Move to...", copy(true)), b("Delete", del, "danger")]));
+  return el("div", { className: "bar" }, ...(!canWrite() ? [] : [b("Copy to...", copy(false)), b("Move to...", copy(true)), b("Delete", del, "danger")]));
 }
 
 const tableRow = (k, v) => el("tr", {}, el("th", { textContent: k }), el("td", {}, v));
@@ -1107,8 +1107,10 @@ async function renderPane(force) { // force: a setting changed under an open pan
   } catch (e) { if (seq === paneSeq) banner(e.message, true); }
 }
 
+const canWrite = () => !cfg.readonly && (!cfg.login || cfg.user); // with an auth proxy, changes need a login
 function notice() {
   if (cfg.readonly) return "Read-only mode.";
+  if (!canWrite()) return "Log in to copy, move or delete.";
   return cfg.deleteEnabled ? "" : "Deletion is disabled on this registry (REGISTRY_STORAGE_DELETE_ENABLED is not true). Move and Delete will fail.";
 }
 
@@ -1688,7 +1690,9 @@ $("help").onclick = () => helpPanel();
 tree.root = { kind: "root", id: "root", name: "Registry", parent: null, kids: new Map(), sortedKids: null };
 tree.byId.set("root", tree.root);
 tree.names = [];
-try { cfg = await api("/api/config"); $("reg").textContent = cfg.registry; $("ver").textContent = `v${cfg.version} · ${cfg.revision.slice(0, 7)}`; banner(notice()); } catch (e) { banner(e.message, true); }
+try { cfg = await api("/api/config"); $("reg").textContent = cfg.registry; $("ver").textContent = `v${cfg.version} · ${cfg.revision.slice(0, 7)}`; banner(notice());
+  if (cfg.login) $("who").replaceChildren(...(cfg.user ? [cfg.user, " ", el("a", { href: cfg.logout, textContent: "Log out" })] : [el("a", { href: cfg.login, textContent: "Log in", className: "btn" })]));
+}  catch (e) { banner(e.message, true); }
 expanded.add("root");
 await sync();
 addEventListener("hashchange", () => void navigate());

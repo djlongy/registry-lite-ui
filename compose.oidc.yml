@@ -4,6 +4,8 @@ services:
     ports: !reset []
     environment:
       UI_ALLOWED_HOSTS: "${UI_ALLOWED_HOSTS:?set UI_ALLOWED_HOSTS to the host name users type in the browser}"
+      UI_LOGIN_URL: /oauth2/start?rd=%2F
+      UI_LOGOUT_URL: /oauth2/sign_out?rd=%2F
   ui-auth:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5@sha256:8498b0d0ef0a7b29686414000a08aee467f02d0299c9ed1e006a8f33fc017916
     ports: ["${UI_PORT:-8080}:4180"]
@@ -22,6 +24,8 @@ services:
       OAUTH2_PROXY_COOKIE_SAMESITE: lax
       OAUTH2_PROXY_PASS_HOST_HEADER: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      # Anyone may browse. POST (copy, move, delete) still needs a session.
+      OAUTH2_PROXY_SKIP_AUTH_ROUTES: GET=^/
     mem_limit: 128m
     pids_limit: 64
     read_only: true
