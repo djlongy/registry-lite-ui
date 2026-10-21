@@ -14,6 +14,8 @@ NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9])?")  # PEP
 VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+!_-]{0,127}")
 FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+!-]{0,254}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+# A GitLab PyPI index, the URL pip is given: a group's (every project in it and its subgroups) or one project's.
+INDEX_RE = re.compile(r"(https?://[^/?#\s]+(?:/[^?#\s]*?)?)/api/v4/(?:groups/([^/?#\s]+)/-|projects/([^/?#\s]+))/packages/pypi(?:/simple)?/?")
 URL_RE = re.compile(r"https?://[A-Za-z0-9.-]+(:\d{1,5})?(/[A-Za-z0-9._~/-]*)?")
 TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})")
 
@@ -24,6 +26,19 @@ class GitLabError(Exception):
         self.status, self.message = status, message
 
 
+def parse_index(url):
+    """(GitLab base URL, "group" or "project", id or path) from an index URL, or ValueError."""
+    m = INDEX_RE.fullmatch(url or "")
+    if not m:
+        raise ValueError("PYPI_INDEX_URL must be a GitLab PyPI index: https://<gitlab>/api/v4/groups/<id or path>/-/packages/pypi/simple "
+                         "or https://<gitlab>/api/v4/projects/<id or path>/packages/pypi/simple")
+    return m[1], ("group" if m[2] else "project"), urllib.parse.unquote(m[2] or m[3])
+
+
+def index_path(scope):
+    return f"/groups/{scope['id']}/-/packages/pypi/simple" if scope["kind"] == "group" else f"/projects/{scope['id']}/packages/pypi/simple"
+
+
 def norm(name):
     """PEP 503: pip treats PyYAML, pyyaml and py_yaml as one project."""
     return re.sub(r"[-_.]+", "-", name).lower()
@@ -32,7 +47,7 @@ def norm(name):
 class Client:
     def __init__(self, url, token, ca_file=None, timeout=20):
         if not re.fullmatch(r"https?://[^/?#\s]+(/[^?#\s]*)?", url or ""):
-            raise ValueError("GITLAB_URL must be http(s)://host[:port][/path]")
+            raise ValueError("the GitLab URL must be http(s)://host[:port][/path]")
         self.url, self.token, self.timeout = url.rstrip("/"), token, timeout
         self.api = self.url + "/api/v4"
         self.ctx = ssl.create_default_context(cafile=ca_file) if ca_file else None
@@ -89,24 +104,30 @@ class Client:
                 raise GitLabError(502, "GitLab sent a bad X-Next-Page")
         return out, False
 
-    def group(self, ref):
-        g = self.get("/groups/" + urllib.parse.quote(str(ref), safe=""))
-        if not (isinstance(g, dict) and isinstance(g.get("id"), int) and isinstance(g.get("full_path"), str)):
-            raise GitLabError(502, "GitLab sent a group without id or full_path")
-        return {"id": g["id"], "path": g["full_path"]}
+    def scope(self, kind, ref):
+        """The group or project the index belongs to: {kind, id, path}."""
+        key = "full_path" if kind == "group" else "path_with_namespace"
+        g = self.get(f"/{kind}s/" + urllib.parse.quote(str(ref), safe=""))
+        if not (isinstance(g, dict) and isinstance(g.get("id"), int) and isinstance(g.get(key), str)):
+            raise GitLabError(502, f"GitLab sent a {kind} without id or {key}")
+        return {"kind": kind, "id": g["id"], "path": g[key]}
 
-    def packages(self, group_id, limit):
-        """Every PyPI package of the group and its subgroups, one entry per upload (a name and version in one project)."""
-        rows, truncated = self.get_all(f"/groups/{group_id}/packages?package_type=pypi&exclude_subgroups=false&order_by=created_at&sort=desc", limit)
+    def packages(self, scope, limit):
+        """Every PyPI upload in the scope (for a group, its projects and subgroups too), one entry per name and version in one project."""
+        if scope["kind"] == "group":
+            rows, truncated = self.get_all(f"/groups/{scope['id']}/packages?package_type=pypi&exclude_subgroups=false&order_by=created_at&sort=desc", limit)
+        else:  # the project list does not name the project in each row
+            rows, truncated = self.get_all(f"/projects/{scope['id']}/packages?package_type=pypi&order_by=created_at&sort=desc", limit)
+            rows = [{**r, "project_id": scope["id"], "project_path": scope["path"]} for r in rows if isinstance(r, dict)]
         return [p for p in (package(r) for r in rows) if p], truncated
 
     def files(self, project, package_id):
         rows, _ = self.get_all(f"/projects/{int(project)}/packages/{int(package_id)}/package_files", 1000)
         return [f for f in (package_file(r) for r in rows) if f]
 
-    def anonymous_index(self, group_id):
-        """Whether GitLab serves the group's PyPI index without a login, so install commands need no token."""
-        req = urllib.request.Request(f"{self.api}/groups/{int(group_id)}/-/packages/pypi/simple")
+    def anonymous_index(self, scope):
+        """Whether GitLab serves the PyPI index without a login, so install commands need no token."""
+        req = urllib.request.Request(self.api + index_path(scope))
         try:
             with urllib.request.urlopen(req, timeout=self.timeout, context=self.ctx) as r:
                 return r.status == 200

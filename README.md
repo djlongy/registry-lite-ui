@@ -80,12 +80,12 @@ A repository browser in the style of Artifactory: a tree on the left, details on
 
 | | |
 |---|---|
-| Reference | `ghcr.io/djlongy/registry-lite-ui`, tagged `latest` (main), the commit sha, and `X.Y.Z` and `X.Y` for a release. The header shows the version and the short commit sha |
+| Reference | `ghcr.io/djlongy/registry-lite-ui`. A release is tagged `X.Y.Z`, `X.Y`, `X` and `latest`; main is tagged `edge`; every build has its commit sha. The header shows the version and the short commit sha |
 | Base | `registry.access.redhat.com/ubi9/python-312-minimal`, pinned by digest, no pip installs |
 | Platforms | `linux/amd64`, `linux/arm64` |
 | Runtime user | uid and gid 65534, read-only root filesystem, `/state` owned by 65534. `compose.yml` runs the registry as 65534:65534 too, see [Shared ownership](#shared-ownership) |
 
-`docker compose up -d` and `podman-compose up -d` pull the prebuilt image. `latest` follows main, so set `UI_IMAGE` in your own `.env` to a version (`ghcr.io/djlongy/registry-lite-ui:0.1.0`) or a digest. To build it yourself:
+`docker compose up -d` and `podman-compose up -d` pull the prebuilt image. Set `UI_IMAGE` in your own `.env` to a version (`ghcr.io/djlongy/registry-lite-ui:0.2.1`) or a digest. Renovate's docker datasource finds new `X.Y.Z` tags and opens the update. To build it yourself:
 
 ```sh
 podman build --format docker --build-arg APP_VERSION="$(cat VERSION)" --build-arg APP_REVISION="$(git rev-parse HEAD)" -f Containerfile -t registry-lite-ui .   # or: docker compose up -d --build
@@ -95,7 +95,7 @@ podman build --format docker --build-arg APP_VERSION="$(cat VERSION)" --build-ar
 
 ## Releases
 
-The version is the `VERSION` file, valid semver, and nothing else. To release, change it to `X.Y.Z` and merge to main. The `build` workflow then publishes `X.Y.Z` and `X.Y`, tags `vX.Y.Z` on that commit and creates the GitHub Release from `RELEASE_NOTES.md` with the image digests. A prerelease suffix (`0.2.0-dev`) or an existing tag skips the release, and main keeps publishing `latest` and the commit sha.
+The version is the `VERSION` file, valid semver. Merging to main publishes `edge` and the commit sha, never a release. To release a tested main, push a tag that matches `VERSION`: `git tag -a v0.2.1 -m "registry-lite-ui 0.2.1" && git push origin v0.2.1`. The `build` workflow then builds that commit, tests the pushed image, publishes `X.Y.Z`, `X.Y`, `X` and `latest`, and creates the GitHub Release from `RELEASE_NOTES.md` with the image digests. A tag that is not `vX.Y.Z` or does not match `VERSION` fails before anything is built.
 
 ## UI only
 
@@ -132,22 +132,22 @@ WantedBy=multi-user.target
 
 ## PyPI packages
 
-`compose.pypi.yml` adds one GitLab group's PyPI packages beside the registry, read from GitLab's package registry API. Without it the UI is containers only, exactly as before.
+`compose.pypi.yml` adds one GitLab PyPI index beside the registry, a group's or a project's, read from GitLab's package registry API. Without it the UI is containers only, exactly as before.
 
 ```sh
 install -m 600 /dev/stdin secrets/gitlab_token   # a token with read_api on the group, or an empty file for a public group; chown it to uid 65534 (see Shared ownership)
-GITLAB_URL=https://gitlab.example.internal GITLAB_GROUP=team/python docker compose -f compose.yml -f compose.pypi.yml up -d
+PYPI_INDEX_URL=https://gitlab.example.internal/api/v4/groups/team%2Fpython/-/packages/pypi/simple docker compose -f compose.yml -f compose.pypi.yml up -d
 ```
 
 | Req | Name | Default | Purpose |
 |---|---|---|---|
-| Required | `GITLAB_URL`, `GITLAB_GROUP` | none | The GitLab the UI reads, and the group path or id. Subgroups are included. |
+| Required | `PYPI_INDEX_URL` | none | The index URL pip is given: a group's (`.../api/v4/groups/<id or path>/-/packages/pypi/simple`, its projects and subgroups included) or a project's (`.../api/v4/projects/<id or path>/packages/pypi/simple`). The GitLab base, a sub-path included, comes from it. `GITLAB_URL` with `GITLAB_GROUP` still works and is deprecated. |
 | Required | `secrets/gitlab_token` | none | One line, a token with `read_api` on the group, read at start and never sent to the browser. For a public group leave the file empty: the UI then reads anonymously. |
-| Optional | `UI_PYPI_PUBLIC_URL` | `GITLAB_URL` | The GitLab address pip users type, when it differs. |
+| Optional | `UI_PYPI_PUBLIC_URL` | the base of `PYPI_INDEX_URL` | The GitLab address pip users type, when it differs. |
 | Optional | `UI_PYPI_INDEX_AUTH` | `auto` | `auto` leaves `__token__:<TOKEN>` and the `.netrc` step out of install commands while GitLab serves the group index without a login, checked every poll. `token` and `none` force either form. |
 | Optional | `UI_PYPI_PUBLIC` | `false` | Behind `compose.oidc.yml`, PyPI data needs a login unless this is `true`. Container data stays readable either way. |
 | Optional | `UI_PYPI_POLL_INTERVAL`, `UI_PYPI_MAX_PACKAGES` | `60`, `20000` | Seconds between reads of the group's package list, and uploads read per poll, newest first. |
-| When GitLab has a private CA | `GITLAB_CA_FILE` | system store | CA bundle the UI trusts for `GITLAB_URL`. |
+| When GitLab has a private CA | `GITLAB_CA_FILE` | system store | CA bundle the UI trusts for GitLab. |
 
 - The tree gets a second root, `PyPI · <group>`, and a type filter (All, Containers, Python) under the search box. Recent lists container changes and PyPI uploads together.
 - A package groups every spelling pip treats as one project (`PyYAML`, `py_yaml`). Versions sort by PEP 440 and Latest skips pre-releases, as pip does.

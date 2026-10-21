@@ -794,6 +794,11 @@ class FakeGitLab(http.server.BaseHTTPRequestHandler):
             return self.answer(401, {"message": "401 Unauthorized"})
         if url.path == "/api/v4/groups/grp":
             return self.answer(200, {"id": 5, "full_path": "grp"})
+        if url.path in ("/api/v4/projects/grp%2Fp7", "/api/v4/projects/7"):
+            return self.answer(200, {"id": 7, "path_with_namespace": "grp/p7"})
+        if url.path == "/api/v4/projects/7/packages":  # a project's list does not name the project in each row
+            rows = [{k: v for k, v in p.items() if k not in ("project_id", "project_path")} for p in self.packages if p["project_id"] == 7][:100]
+            return self.answer(200, rows, headers=[("X-Next-Page", "")])
         if url.path == "/api/v4/groups/5/packages":
             page, per = int(q["page"][0]), int(q["per_page"][0])
             rows = self.packages[(page - 1) * per: page * per]
@@ -822,7 +827,8 @@ class PypiSource(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.gl = serve_fake(FakeGitLab)
-        cls.env = {"GITLAB_URL": f"http://127.0.0.1:{cls.gl.server_address[1]}", "GITLAB_GROUP": "grp", "GITLAB_TOKEN": TOKEN}
+        cls.base = f"http://127.0.0.1:{cls.gl.server_address[1]}"
+        cls.env = {"PYPI_INDEX_URL": f"{cls.base}/api/v4/groups/grp/-/packages/pypi/simple", "GITLAB_TOKEN": TOKEN}
 
     @classmethod
     def tearDownClass(cls):
@@ -866,7 +872,7 @@ class PypiSource(unittest.TestCase):
         port = srv.server_address[1]
         self.assertEqual(json.loads(self.get(port, "/api/config")[1])["pypi"], {"locked": True})  # no host, no group
         opened = json.loads(self.get(port, "/api/config", "X-Forwarded-Email: a@example.internal\r\n")[1])["pypi"]
-        self.assertEqual((opened["groupRef"], opened["indexAuth"]), ("grp", "token"))
+        self.assertEqual((opened["ref"], opened["kind"], opened["indexAuth"]), ("grp", "group", "token"))
 
     def test_packages_files_and_index_auth(self):
         cfg, port = self.serve(self.env)
@@ -899,9 +905,31 @@ class PypiSource(unittest.TestCase):
         self.assertEqual(len(cfg.pypi.catalog.snapshot()["packages"]), 249)  # the last list stays
 
     def test_config_is_checked(self):
-        for change in ({"GITLAB_GROUP": ""}, {"GITLAB_URL": "g.example"}, {"UI_PYPI_PUBLIC_URL": "javascript:x"}, {"UI_PYPI_INDEX_AUTH": "maybe"}):
+        bad_urls = ("g.example", f"{self.base}/api/v4/groups/grp/packages/pypi/simple", f"{self.base}/api/v4/projects/7/-/packages/pypi/simple",
+                    f"{self.base}/api/v4/users/7/packages/pypi/simple", "javascript:alert(1)")
+        for change in [{"PYPI_INDEX_URL": u} for u in bad_urls] + [{"UI_PYPI_PUBLIC_URL": "javascript:x"}, {"UI_PYPI_INDEX_AUTH": "maybe"}]:
             with self.assertRaises(ValueError, msg=change):
                 Y.Source({**self.env, **change})
+
+    def test_index_url_forms(self):
+        cases = {
+            "https://g.example/api/v4/groups/10/-/packages/pypi/simple": ("https://g.example", "group", "10"),
+            "https://g.example/api/v4/groups/team%2Fpython/-/packages/pypi": ("https://g.example", "group", "team/python"),
+            "https://g.example/gitlab/api/v4/projects/104/packages/pypi/simple/": ("https://g.example/gitlab", "project", "104"),
+            "http://g.example:8080/api/v4/projects/pub%2Fpkgs/packages/pypi/simple": ("http://g.example:8080", "project", "pub/pkgs"),
+        }
+        for url, want in cases.items():
+            self.assertEqual(G.parse_index(url), want, url)
+        self.assertEqual(Y.index_url({"GITLAB_URL": "https://g.example/", "GITLAB_GROUP": "team/python"}),  # the 0.2.0 settings still work
+                         "https://g.example/api/v4/groups/team%2Fpython/-/packages/pypi/simple")
+
+    def test_project_index(self):
+        cfg, port = self.serve({**self.env, "PYPI_INDEX_URL": f"{self.base}/api/v4/projects/grp%2Fp7/packages/pypi/simple"})
+        status, body = self.get(port, "/api/pypi/packages")
+        snap = json.loads(body)
+        self.assertEqual((status, snap["scope"]), (200, {"kind": "project", "id": 7, "path": "grp/p7"}))
+        self.assertEqual({p["project"] for p in snap["packages"]}, {"grp/p7"})  # filled in from the project, which the rows leave out
+        self.assertTrue(cfg.pypi.config()["index"].endswith("/api/v4/projects/7/packages/pypi/simple"))
 
     def test_wheel_tags(self):
         d = G.describe("x-1.0-cp312-cp312-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl")

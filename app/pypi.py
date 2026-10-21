@@ -1,10 +1,11 @@
-"""The PyPI source: one GitLab group's PyPI packages, kept in memory and refreshed by its own poller.
+"""The PyPI source: one GitLab PyPI index (a group's or a project's), kept in memory and refreshed by its own poller.
 GitLab records when each file was uploaded, so Recent needs no history of its own: a change is any difference in
 the list, and the sequence number tells the browsers."""
 import collections
 import logging
 import threading
 import time
+import urllib.parse
 
 import gitlab as G
 import poller as P
@@ -16,14 +17,14 @@ class Catalog:
     """The last package list read, with a sequence number that moves when an upload comes or goes."""
     def __init__(self, clock=time.time):
         self.clock, self.cond = clock, threading.Condition()
-        self.packages, self.truncated, self.group, self.seq, self.loaded, self.error = [], False, None, 0, None, ""
-        self.anonymous = False  # GitLab serves the group index without a login
-        self.sig, self.by_id = None, {}  # by_id: upload id -> upload, so /api/pypi/files serves only this group's packages
+        self.packages, self.truncated, self.scope, self.seq, self.loaded, self.error = [], False, None, 0, None, ""
+        self.anonymous = False  # GitLab serves the index without a login
+        self.sig, self.by_id = None, {}  # by_id: upload id -> upload, so /api/pypi/files serves only this index's packages
 
-    def update(self, group, packages, truncated):
+    def update(self, scope, packages, truncated):
         sig = tuple(sorted((p["id"], p["created"] or "") for p in packages))
         with self.cond:
-            self.group, self.truncated, self.loaded, self.error = group, truncated, self.clock(), ""
+            self.scope, self.truncated, self.loaded, self.error = scope, truncated, self.clock(), ""
             self.packages, self.by_id = packages, {p["id"]: p for p in packages}  # always: download times change too
             if sig != self.sig:  # browsers are told only when an upload came or went
                 self.sig = sig
@@ -40,16 +41,16 @@ class Catalog:
 
     def snapshot(self):
         with self.cond:
-            return {"seq": self.seq, "group": self.group, "packages": self.packages, "truncated": self.truncated,
+            return {"seq": self.seq, "scope": self.scope, "packages": self.packages, "truncated": self.truncated,
                     "loaded": self.loaded, "error": self.error}
 
 
 class Poller(threading.Thread):
-    """Reads the group's package list every `interval` seconds, backing off while GitLab fails."""
-    def __init__(self, client, catalog, group_ref, interval=60, limit=20000):
+    """Reads the index's package list every `interval` seconds, backing off while GitLab fails."""
+    def __init__(self, client, catalog, kind, ref, interval=60, limit=20000):
         super().__init__(daemon=True, name="pypi-poller")
-        self.client, self.catalog, self.group_ref, self.interval, self.limit = client, catalog, group_ref, interval, limit
-        self.group, self.kick, self.stop = None, threading.Event(), threading.Event()
+        self.client, self.catalog, self.kind, self.ref, self.interval, self.limit = client, catalog, kind, ref, interval, limit
+        self.scope, self.kick, self.stop = None, threading.Event(), threading.Event()
         self.throttle, self.last_tick = P.Throttle(logger=log), time.monotonic()
         client.on_page = self.tick  # each page of a long list counts as progress
 
@@ -60,13 +61,13 @@ class Poller(threading.Thread):
         return time.monotonic() - self.last_tick < 3 * max(self.interval, 300)
 
     def cycle(self):
-        if self.group is None:
-            self.group = self.client.group(self.group_ref)
-        packages, truncated = self.client.packages(self.group["id"], self.limit)
+        if self.scope is None:
+            self.scope = self.client.scope(self.kind, self.ref)
+        packages, truncated = self.client.packages(self.scope, self.limit)
         if truncated:
-            self.throttle.error("limit", f"the group has more than {self.limit} PyPI uploads; only the newest {self.limit} are shown (UI_PYPI_MAX_PACKAGES)")
-        self.catalog.anonymous = self.client.anonymous_index(self.group["id"])
-        self.catalog.update(self.group, packages, truncated)
+            self.throttle.error("limit", f"{self.scope['path']} has more than {self.limit} PyPI uploads; only the newest {self.limit} are shown (UI_PYPI_MAX_PACKAGES)")
+        self.catalog.anonymous = self.client.anonymous_index(self.scope)
+        self.catalog.update(self.scope, packages, truncated)
 
     def run(self):
         fails = 0
@@ -111,16 +112,22 @@ class FileCache:
         return out
 
 
+def index_url(env):
+    """PYPI_INDEX_URL, or the 0.2.0 pair GITLAB_URL and GITLAB_GROUP (deprecated) turned into the group's index URL."""
+    if env.get("PYPI_INDEX_URL"):
+        return env["PYPI_INDEX_URL"].strip()
+    group = urllib.parse.quote(env.get("GITLAB_GROUP", "").strip(), safe="")
+    return f"{env.get('GITLAB_URL', '').rstrip('/')}/api/v4/groups/{group}/-/packages/pypi/simple" if group else ""
+
+
 class Source:
-    """Everything the server needs for the PyPI source, built from the environment. None of it exists when GITLAB_URL is unset."""
+    """Everything the server needs for the PyPI source, built from the environment. None of it exists when PYPI_INDEX_URL is unset."""
     def __init__(self, env):
         token_file = env.get("GITLAB_TOKEN_FILE")
         token = open(token_file).read().strip() if token_file else env.get("GITLAB_TOKEN", "")  # empty: anonymous, for a public group
-        self.client = G.Client(env["GITLAB_URL"], token, env.get("GITLAB_CA_FILE") or None)
-        self.group_ref = env.get("GITLAB_GROUP", "").strip()
-        if not self.group_ref:
-            raise ValueError("set GITLAB_GROUP to the group path (such as team/python) or its numeric id")
-        self.public_url = (env.get("UI_PYPI_PUBLIC_URL") or env["GITLAB_URL"]).rstrip("/")  # what pip users type
+        base, self.kind, self.ref = G.parse_index(index_url(env))
+        self.client = G.Client(base, token, env.get("GITLAB_CA_FILE") or None)
+        self.public_url = (env.get("UI_PYPI_PUBLIC_URL") or base).rstrip("/")  # the GitLab address pip users type
         if not G.URL_RE.fullmatch(self.public_url):
             raise ValueError("UI_PYPI_PUBLIC_URL must be http(s)://host[:port][/path]")
         # auto: the commands leave out __token__:<TOKEN> while GitLab serves the index without a login. token, none: forced.
@@ -133,9 +140,11 @@ class Source:
         self.interval, self.limit = n("UI_PYPI_POLL_INTERVAL", 60), n("UI_PYPI_MAX_PACKAGES", 20000)
         self.catalog = Catalog()
         self.files = FileCache(self.client, self.interval)
-        self.poller = Poller(self.client, self.catalog, self.group_ref, self.interval, self.limit)
+        self.poller = Poller(self.client, self.catalog, self.kind, self.ref, self.interval, self.limit)
 
     def config(self):
         anonymous = self.catalog.anonymous if self.index_auth == "auto" else self.index_auth == "none"
-        return {"gitlab": self.public_url, "group": self.catalog.snapshot()["group"], "groupRef": self.group_ref,
+        scope = self.catalog.snapshot()["scope"]
+        return {"gitlab": self.public_url, "scope": scope, "kind": self.kind, "ref": self.ref,
+                "index": self.public_url + "/api/v4" + G.index_path(scope) if scope else None,
                 "interval": self.interval, "indexAuth": "none" if anonymous else "token"}
