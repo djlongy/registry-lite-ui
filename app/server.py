@@ -86,7 +86,7 @@ class Config:
                              n("UI_MAX_EVENT_DAYS", 30) * 86400)
         self.poller = None
         self.errors = P.Throttle(logger=log)
-        self.pypi = Y.Source(env) if env.get("GITLAB_URL") else None  # the optional PyPI source
+        self.pypi = Y.Source(env) if env.get("PYPI_INDEX_URL") or env.get("GITLAB_URL") else None  # the optional PyPI source
 
 
 def server_context(cert, key):
@@ -497,7 +497,7 @@ def main(env):
     cfg.poller.start()
     if cfg.pypi:
         cfg.pypi.poller.start()
-        log.info("PyPI source: GitLab %s, group %s", cfg.pypi.client.url, cfg.pypi.group_ref)
+        log.info("PyPI source: GitLab %s, %s %s", cfg.pypi.client.url, cfg.pypi.kind, cfg.pypi.ref)
     threading.Thread(target=watchdog, args=(cfg,), daemon=True, name="watchdog").start()
     stop = threading.Event()  # a thread started now, since SIGTERM may arrive when no thread can be created
     threading.Thread(target=lambda: (stop.wait(), httpd.shutdown()), daemon=True, name="stop").start()

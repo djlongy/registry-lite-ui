@@ -335,7 +335,7 @@ function reconcileTags(n, rows, flashChanges) {
   for (const [k, t] of n.tagMap) {
     if (!seen.has(k)) { n.tagMap.delete(k); dropTag(t); }
   }
-  n.tagList = [...n.tagMap.values()].sort(byName);
+  n.tagList = [...n.tagMap.values()].sort((x, y) => tagCompare(y.tag, x.tag)); // newest version first, as in the PyPI tree
 }
 function getManifest(path, ref, digest, fresh) {
   const key = `${path}@${digest}`;
@@ -1818,7 +1818,8 @@ function applyPypi(list, flashNew) {
   if (flashNew) for (const id of fresh) flash(tree.byId.get(id));
   return fresh;
 }
-const pypiLabel = () => "PyPI" + (pypi.group ? " · " + pypi.group.path : cfg.pypi?.groupRef ? " · " + cfg.pypi.groupRef : "");
+const pypiLabel = () => "PyPI" + (pypi.scope ? " · " + pypi.scope.path : cfg.pypi?.ref ? " · " + cfg.pypi.ref : "");
+const projectScope = () => pypi.scope?.kind === "project"; // one project's index, not a group's
 const pkgSort = (list) => [...list].sort(prefs.sort === "recent" ? (a, b) => (b.created || "").localeCompare(a.created || "") || byName(a, b) : byName);
 const pkgHit = (n, term) => n.key.includes(term) || n.name.toLowerCase().includes(term);
 const verHit = (n, term) => !pkgHit(n, term) && n.verList.some((v) => v.version.toLowerCase().includes(term));
@@ -1873,7 +1874,7 @@ function versionSummary(v) {
 // Checked against pip 26.2, uv 0.13 and twine 7.0: uv takes --default-index and UV_DEFAULT_INDEX (UV_INDEX_URL is deprecated),
 // and pip and uv both read ~/.netrc on every OS. <TOKEN> marks where a token goes; this page never holds one.
 const pypiHost = () => (cfg.pypi?.gitlab || "").replace(/^https?:\/\//, "");
-const groupIndex = () => `${cfg.pypi.gitlab}/api/v4/groups/${pypi.group ? pypi.group.id : "<GROUP_ID>"}/-/packages/pypi/simple`;
+const groupIndex = () => (pypi.scope ? `${cfg.pypi.gitlab}/api/v4${projectScope() ? `/projects/${pypi.scope.id}/packages/pypi/simple` : `/groups/${pypi.scope.id}/-/packages/pypi/simple`}` : "<INDEX_URL>");
 const projectIndex = (id) => `${cfg.pypi.gitlab}/api/v4/projects/${id}/packages/pypi/simple`;
 const publicIndex = () => cfg.pypi?.indexAuth === "none"; // GitLab serves the index without a login
 const withToken = (url) => (publicIndex() ? url : url.replace(/^(https?:\/\/)/, "$1__token__:<TOKEN>@"));
@@ -1885,11 +1886,11 @@ function pypiCommandSets({ name, version, project }) {
   const pipOf = (tool) => (tool === "uv" ? "uv pip" : win ? "py -m pip" : "python3 -m pip");
   const indexFlag = (tool) => (tool === "uv" ? "--default-index" : "--index-url");
   const install = (tool) => [
-    cmdNote("From the group index, which lists every project's packages. GitLab asks pypi.org for anything it does not hold, if the group allows it."),
+    cmdNote(projectScope() ? "From the project's index. GitLab asks pypi.org for anything it does not hold, if the project allows it." : "From the group index, which lists every project's packages. GitLab asks pypi.org for anything it does not hold, if the group allows it."),
     codeBlock("Install", [`${pipOf(tool)} install ${indexFlag(tool)} ${index} ${spec}`]),
     ...(version ? [cmdNote(tool === "uv" ? "Download the files only, without installing. uv has no download command, so this is pip." : "Download the files only, without installing."),
       codeBlock("Download", [`${pipOf("pip")} download --no-deps --index-url ${index} ${spec}`])] : []),
-    ...(project ? [cmdNote("From one project's index only, when several projects hold the same version."), codeBlock("Install from this project", [`${pipOf(tool)} install ${indexFlag(tool)} ${withToken(projectIndex(project))} ${spec}`])] : [])];
+    ...(project && !projectScope() ? [cmdNote("From one project's index only, when several projects hold the same version."), codeBlock("Install from this project", [`${pipOf(tool)} install ${indexFlag(tool)} ${withToken(projectIndex(project))} ${spec}`])] : [])];
   const netrcLine = `machine ${pypiHost().split("/")[0]} login __token__ password <TOKEN>`;
   const configure = (tool) => {
     const idx = tool === "uv"
@@ -1991,7 +1992,7 @@ function prootPane(n) {
   const pkgs = n.kids, projects = uniq(pypi.packages.map((u) => u.project));
   showMain(pypiCrumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("pypi")), pypiLabel()),
     stats(plural(pkgs.length, "package"), plural(pypi.packages.length, "upload"), plural(projects.length, "project"), pypi.truncated ? "newest uploads only (UI_PYPI_MAX_PACKAGES)" : ""),
-    el("p", { className: "reporef" }, copyValue(groupIndex(), "Copy the group index URL")),
+    el("p", { className: "reporef" }, copyValue(groupIndex(), "Copy the index URL")),
     ...listView({
       id: "pkgs", items: pkgs, tie: byName, defaultCmp: prefs.sort === "recent" ? (a, b) => (b.created || "").localeCompare(a.created || "") || byName(a, b) : byName,
       columns: [
@@ -2007,7 +2008,7 @@ function prootPane(n) {
         el("td", { textContent: p.verList.length }), el("td", { className: "mut", textContent: p.projects.length }),
         el("td", { className: "mut" }, when(p.created)), el("td", { className: "mut" }, when(p.downloaded, "never"))),
     }),
-    pypiCommandsEl({ name: "", version: "", project: "" }, "Use this index"));
+    pypiCommandsEl({ name: "", version: "", project: projectScope() ? pypi.scope.id : "" }, "Use this index"));
 }
 function versionRow(v) { // a table row for a version, whose Python, platforms, files and size fill in from its copies
   const req = el("td", { className: "mut nw" }), built = el("td", { className: "mut" }), plat = el("td", { className: "mut" }), count = el("td", { className: "mut" }), sz = el("td", { className: "mut nw" });
