@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import poller as P
+import gitlab as G
+import pypi as Y
 import registry as R
 
 log = logging.getLogger("ui")
@@ -84,6 +86,7 @@ class Config:
                              n("UI_MAX_EVENT_DAYS", 30) * 86400)
         self.poller = None
         self.errors = P.Throttle(logger=log)
+        self.pypi = Y.Source(env) if env.get("GITLAB_URL") else None  # the optional PyPI source
 
 
 def server_context(cert, key):
@@ -255,7 +258,8 @@ def routes(cfg):
                                   "registry": cfg.registry_url,
                                   "registryHost": cfg.registry_host or urllib.parse.urlsplit(cfg.registry_url).netloc,
                                   "registryHostSet": bool(cfg.registry_host), "environments": cfg.environments, "registryStorage": cfg.registry_storage,
-                                  "version": cfg.version, "revision": cfg.revision, "login": cfg.login_url, "logout": cfg.logout_url},
+                                  "version": cfg.version, "revision": cfg.revision, "login": cfg.login_url, "logout": cfg.logout_url,
+                                  "pypi": cfg.pypi.config() if cfg.pypi else None},
         "/api/repos": lambda q: sorted(c.catalog()),
         "/api/tags": tags,
         "/api/recent": recent,
@@ -268,6 +272,25 @@ def routes(cfg):
         "/api/move": woken(lambda *a: {"deleted": R.move(c, *a)}),
         "/api/delete": delete,
     }
+    if cfg.pypi:
+        y = cfg.pypi
+
+        def pypi_packages(q):
+            snap = y.catalog.snapshot()
+            if snap["loaded"] is None and snap["error"]:
+                raise R.RegistryError(502, snap["error"])  # never loaded: say why instead of showing an empty group
+            return snap
+
+        def pypi_files(q):
+            u = y.catalog.upload(int(one(q, "id")))  # only this group's uploads, so the token reads nothing else through here
+            if u is None:
+                raise R.RegistryError(404, "no such upload in this group")
+            try:
+                return y.files.get(u["projectId"], u["id"], u["name"])
+            except G.GitLabError as e:
+                raise R.RegistryError(e.status, e.message) from None
+
+        get.update({"/api/pypi/packages": pypi_packages, "/api/pypi/files": pypi_files, "/api/pypi/seq": lambda q: {"seq": y.catalog.seq}})
     return get, post
 
 
@@ -321,11 +344,17 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.log_request(200)
             seq = self.cfg.state.seq
+            watch_pypi = bool(self.cfg.pypi) and not self.pypi_locked()  # a locked user is not told when uploads happen
+            pseq = self.cfg.pypi.catalog.seq if watch_pypi else 0
             self.wfile.write(b"retry: 5000\n\n")
             self.wfile.flush()
             idle = 0
             while not self.hung_up():
                 now = self.cfg.state.wait(seq, 1)
+                if watch_pypi and self.cfg.pypi.catalog.seq != pseq:  # a named event, so the browser reloads only the PyPI list
+                    pseq = self.cfg.pypi.catalog.seq
+                    self.wfile.write(b"event: pypi\ndata: %d\n\n" % pseq)
+                    self.wfile.flush()
                 idle = idle + 1 if now == seq else 0
                 if idle in (0, 15):  # a change, or 15 quiet seconds: heartbeat
                     self.wfile.write(b": hb\n\n" if now == seq else b"data: %d\n\n" % now)
@@ -365,8 +394,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": "CSRF check failed"})
         self.reply(200, handler(self.read_json()))
 
+    def pypi_locked(self):
+        """PyPI data needs a login: an auth proxy is in front, the packages are not public, and this request has no user."""
+        return bool(self.cfg.pypi and self.cfg.login_url and not self.cfg.pypi.public and not user_of(self.headers))
+
     def health(self):  # never calls the registry
-        healthy = self.cfg.poller is None or self.cfg.poller.healthy()
+        healthy = (self.cfg.poller is None or self.cfg.poller.healthy()) and (self.cfg.pypi is None or self.cfg.pypi.poller.healthy())
         self.send(200 if healthy else 503, b"ok" if healthy else b"poller stalled", "text/plain")
 
     def dispatch(self, method, url):
@@ -384,7 +417,12 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/events":
             return self.events()
         if url.path == "/api/config":  # who is logged in comes from this request's headers
-            return self.reply(200, {**self.get[url.path]({}), "user": user_of(self.headers)})
+            out = {**self.get[url.path]({}), "user": user_of(self.headers)}
+            if self.pypi_locked():
+                out["pypi"] = {"locked": True}  # not the GitLab host or the group, which the login guards
+            return self.reply(200, out)
+        if url.path.startswith("/api/pypi/") and self.pypi_locked():
+            return self.reply(401, {"error": "log in to see Python packages"})  # the proxy strips a forged user header
         if url.path in self.get:
             return self.reply(200, self.get[url.path](urllib.parse.parse_qs(url.query)))
         self.reply(404, {"error": "not found"})
@@ -434,8 +472,8 @@ def watchdog(cfg, every=60):
     """A stalled poller is not fixed by an unhealthy flag alone, so exit and let the restart policy bring the UI back."""
     while True:
         time.sleep(every)
-        if not cfg.poller.healthy():
-            log.error("poller has stalled, exiting so the container restarts")
+        if not cfg.poller.healthy() or (cfg.pypi and not cfg.pypi.poller.healthy()):
+            log.error("a poller has stalled, exiting so the container restarts")
             cfg.state.save(force=True, wait=5)
             os._exit(1)
 
@@ -457,6 +495,9 @@ def main(env):
         httpd.socket = server_context(cert, key).wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
     cfg.poller = P.Poller(cfg.client, cfg.state, cfg.interval, cfg.max_tags)
     cfg.poller.start()
+    if cfg.pypi:
+        cfg.pypi.poller.start()
+        log.info("PyPI source: GitLab %s, group %s", cfg.pypi.client.url, cfg.pypi.group_ref)
     threading.Thread(target=watchdog, args=(cfg,), daemon=True, name="watchdog").start()
     stop = threading.Event()  # a thread started now, since SIGTERM may arrive when no thread can be created
     threading.Thread(target=lambda: (stop.wait(), httpd.shutdown()), daemon=True, name="stop").start()

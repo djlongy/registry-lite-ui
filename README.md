@@ -130,6 +130,32 @@ WantedBy=multi-user.target
 - To pin the image, set `UI_IMAGE=ghcr.io/djlongy/registry-lite-ui@sha256:<digest>`.
 - To run a commit other than main, build it with `podman build --format docker -f Containerfile -t localhost/registry-lite-ui:<tag> .` and set `UI_IMAGE=localhost/registry-lite-ui:<tag>`. `--format docker` keeps the `HEALTHCHECK`; the OCI format drops it with a warning.
 
+## PyPI packages
+
+`compose.pypi.yml` adds one GitLab group's PyPI packages beside the registry, read from GitLab's package registry API. Without it the UI is containers only, exactly as before.
+
+```sh
+install -m 600 /dev/stdin secrets/gitlab_token   # a token with read_api on the group, or an empty file for a public group; chown it to uid 65534 (see Shared ownership)
+GITLAB_URL=https://gitlab.example.internal GITLAB_GROUP=team/python docker compose -f compose.yml -f compose.pypi.yml up -d
+```
+
+| Req | Name | Default | Purpose |
+|---|---|---|---|
+| Required | `GITLAB_URL`, `GITLAB_GROUP` | none | The GitLab the UI reads, and the group path or id. Subgroups are included. |
+| Required | `secrets/gitlab_token` | none | One line, a token with `read_api` on the group, read at start and never sent to the browser. For a public group leave the file empty: the UI then reads anonymously. |
+| Optional | `UI_PYPI_PUBLIC_URL` | `GITLAB_URL` | The GitLab address pip users type, when it differs. |
+| Optional | `UI_PYPI_INDEX_AUTH` | `auto` | `auto` leaves `__token__:<TOKEN>` and the `.netrc` step out of install commands while GitLab serves the group index without a login, checked every poll. `token` and `none` force either form. |
+| Optional | `UI_PYPI_PUBLIC` | `false` | Behind `compose.oidc.yml`, PyPI data needs a login unless this is `true`. Container data stays readable either way. |
+| Optional | `UI_PYPI_POLL_INTERVAL`, `UI_PYPI_MAX_PACKAGES` | `60`, `20000` | Seconds between reads of the group's package list, and uploads read per poll, newest first. |
+| When GitLab has a private CA | `GITLAB_CA_FILE` | system store | CA bundle the UI trusts for `GITLAB_URL`. |
+
+- The tree gets a second root, `PyPI · <group>`, and a type filter (All, Containers, Python) under the search box. Recent lists container changes and PyPI uploads together.
+- A package groups every spelling pip treats as one project (`PyYAML`, `py_yaml`). Versions sort by PEP 440 and Latest skips pre-releases, as pip does.
+- A version held by several projects lists each copy in one table. Each copy shows its files with SHA-256, Requires-Python (flagged when an uploader left it out) and the Python, ABI and platform read from the wheel name.
+- Install, configure and upload commands come for pip or uv, on Linux/macOS (shell) or Windows (PowerShell). They never contain a token.
+- `/api/pypi/files` answers only for uploads of the configured group, so the token reads nothing else through the UI.
+- Without an auth override, anyone who reaches the UI sees every package the token can read. With an empty token that is exactly what GitLab shows anonymously.
+
 ## Components
 
 | File | What it is |
@@ -137,6 +163,8 @@ WantedBy=multi-user.target
 | `compose.yml` | `registry:2` published on 5000 exactly as before, plus the UI on 8080. |
 | `app/registry.py` | A 200-line stdlib client for the registry HTTP API with name validation and the copy, move and delete logic. It never touches registry storage. |
 | `app/server.py` | A `http.server` app that serves four static files, a JSON API and a Server-Sent Events stream, with CSRF checks, connection caps and logging to stdout. |
+| `app/gitlab.py`, `app/pypi.py` | The optional PyPI source: a stdlib client for GitLab's package API and the group index, and its own poller. Read only. |
+| `compose.pypi.yml` | Turns the PyPI source on. |
 | `app/poller.py` | A thread that polls the registry's own API for tag and digest changes and keeps a capped event history in memory, optionally in one JSON file. It never talks to anything but the registry. |
 | `app/static/` | Vanilla HTML, CSS and JS with no build step. Data is rendered with `textContent`, never `innerHTML`, and the theme is a class set by same-origin JS under a strict CSP. |
 | `Containerfile` | `ubi9/python-312-minimal` pinned by digest, uid 65534, no pip installs. |
@@ -213,7 +241,7 @@ Off by default. Each option is an override file and removes the UI's direct port
 | Option | Command |
 |---|---|
 | Basic | `htpasswd -B -c auth/htpasswd admin`, set `UI_ALLOWED_HOSTS`, then `docker compose -f compose.yml -f compose.basic.yml up -d` |
-| OIDC | Set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_COOKIE_SECRET`, `OIDC_REDIRECT_URL`, `OIDC_EMAIL_DOMAINS` (no default, `*` admits every account the issuer vouches for) and `UI_ALLOWED_HOSTS` in `.env`, optionally `OIDC_ALLOWED_GROUPS`, then `-f compose.yml -f compose.oidc.yml`. oauth2-proxy does all OIDC work. Anyone may browse without logging in (`OAUTH2_PROXY_SKIP_AUTH_ROUTES` lets every GET through). The header shows Log in, and Copy to..., Move to... and Delete appear only for a logged-in user. oauth2-proxy refuses every POST without a session, and the UI refuses one without `X-Forwarded-Email` (401) when `UI_LOGIN_URL` is set. Log out clears the proxy session only, so the next log in may not ask for a password. The issuer must send `email` with `email_verified` true, and a `groups` claim when `OIDC_ALLOWED_GROUPS` is set (in Keycloak, a Group Membership mapper named `groups` with full group path off). Logins use PKCE (S256). |
+| OIDC | Set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_COOKIE_SECRET`, `OIDC_REDIRECT_URL`, `OIDC_EMAIL_DOMAINS` (no default, `*` admits every account the issuer vouches for) and `UI_ALLOWED_HOSTS` in `.env`, optionally `OIDC_ALLOWED_GROUPS`, then `-f compose.yml -f compose.oidc.yml`. oauth2-proxy does all OIDC work. Anyone may browse without logging in (`OAUTH2_PROXY_SKIP_AUTH_ROUTES` lets every GET through). The header shows Log in, and Copy to..., Move to... and Delete appear only for a logged-in user. oauth2-proxy refuses every POST without a session, and the UI refuses one without `X-Forwarded-Email` (401) when `UI_LOGIN_URL` is set. Log out clears the proxy session only, so the next log in may not ask for a password. The issuer must send `email` with `email_verified` true, and a `groups` claim when `OIDC_ALLOWED_GROUPS` is set (in Keycloak, a Group Membership mapper named `groups` with full group path off). Logins use PKCE (S256). With `compose.pypi.yml`, PyPI data needs a login too: the UI answers `/api/pypi/*` with 401 without a user, unless `UI_PYPI_PUBLIC=true`. oauth2-proxy strips an `X-Forwarded-Email` sent by the client, so the header cannot be forged through it. |
 | LDAP | `-f compose.yml -f compose.oidc.yml -f compose.ldap.yml`. dex with its LDAP connector is the OIDC provider and serves HTTPS with `TLS_CERT` and `DEX_TLS_KEY`; set `LDAP_BIND_PW` (a `$` in a value written in `.env` needs `$$`, because compose interpolates `.env`; a value exported from the shell is written plainly, and dex copies it as is) and `DEX_HOST` (the host name in `OIDC_ISSUER_URL`, which carries dex's port, for example `https://dex.example.internal:5556/dex`). oauth2-proxy trusts `TLS_CERT` and reaches dex by that name; do not set `OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY`. Edit `auth/dex-ldap.yaml`. Restrict who may log in with the LDAP filter and `OIDC_ALLOWED_GROUPS`. |
 | Registry's own basic auth | `-f compose.registry-auth.yml` with `REGISTRY_USER` set and the password in `secrets/registry_password`. |
 

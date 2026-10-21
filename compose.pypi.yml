@@ -1,0 +1,23 @@
+# The PyPI source: one GitLab group's PyPI packages beside the registry, with a type filter in the tree. Set in .env:
+#   GITLAB_URL           the GitLab the UI reads, for example https://gitlab.example.internal
+#   GITLAB_GROUP         the group path (team/python) or its numeric id; its subgroups are included
+#   UI_PYPI_PUBLIC_URL   the GitLab address pip users type, when it differs from GITLAB_URL
+#   UI_PYPI_INDEX_AUTH   auto (default) leaves __token__:<TOKEN> out of install commands while GitLab serves the index anonymously
+#   UI_PYPI_PUBLIC       true lets anyone see the packages behind compose.oidc.yml; unset, they need a login there
+# The token goes in ./secrets/gitlab_token: one line, a token with read_api on the group, readable by uid 65534 (see README).
+# For a public group the file may be empty: the UI then reads GitLab anonymously.
+services:
+  registry-lite-ui:
+    environment:
+      GITLAB_URL: ${GITLAB_URL:?set GITLAB_URL}
+      GITLAB_GROUP: ${GITLAB_GROUP:?set GITLAB_GROUP}
+      GITLAB_TOKEN_FILE: /run/secrets/gitlab_token
+      GITLAB_CA_FILE: "${GITLAB_CA_FILE:-}"
+      UI_PYPI_PUBLIC_URL: "${UI_PYPI_PUBLIC_URL:-}"
+      UI_PYPI_INDEX_AUTH: "${UI_PYPI_INDEX_AUTH:-auto}"
+      UI_PYPI_PUBLIC: "${UI_PYPI_PUBLIC:-false}"
+      UI_PYPI_POLL_INTERVAL: "${UI_PYPI_POLL_INTERVAL:-60}"
+    secrets: [gitlab_token]
+secrets:
+  gitlab_token:
+    file: ./secrets/gitlab_token

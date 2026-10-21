@@ -1,8 +1,15 @@
-registry-lite-ui is a web UI for a plain `registry:2` that browses, copies, moves, promotes and deletes images through the registry's own HTTP API.
+registry-lite-ui is a web UI for a plain `registry:2` that browses, copies, moves, promotes and deletes images through the registry's own HTTP API, and optionally browses one GitLab group's PyPI packages.
 
 ## Run it
 
 `podman-compose up -d` with `compose.yml` (registry and UI), or `podman-compose -f compose.ui.yml up -d` with `REGISTRY_URL` set for a registry that already runs. `docker compose` works the same way. Pin `UI_IMAGE` to a version or a digest in your `.env`.
+
+## Changes in 0.2.0
+
+- An optional PyPI source (`compose.pypi.yml`): one GitLab group's PyPI packages beside the registry, with a type filter in the tree, one Recent list for both, PEP 440 version order, files with SHA-256, Requires-Python and wheel platforms, and pip or uv commands for Linux/macOS and Windows.
+- Behind the OIDC override, PyPI data needs a login unless `UI_PYPI_PUBLIC=true`. Container data stays readable without one.
+- Install commands leave out the token when GitLab serves the group index anonymously (`UI_PYPI_INDEX_AUTH=auto`), and a public group needs no token at all (an empty `secrets/gitlab_token`).
+- Fixed: a long list could make the page itself scroll past the panel and leave an empty band below it.
 
 ## Changes in 0.1.1
 
