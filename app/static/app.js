@@ -8,8 +8,8 @@ let updated = null;
 
 // Preferences only, no data or secrets. Storage may be blocked, so every access is guarded.
 // expanded and selected are the tree state (node ids and the location hash), sidebar is its width in px.
-const DEFAULTS = { theme: "system", sort: "recent", live: true, interval: 30, pageSize: 50, runtime: "podman", showEmpty: false, sidebar: 280, selected: "/recent", expanded: [] };
-const CHOICES = { theme: ["system", "light", "dark"], sort: ["recent", "name"], runtime: ["podman", "docker"], interval: [10, 30, 60, 300], pageSize: [25, 50, 100, 200] };
+const DEFAULTS = { theme: "system", sort: "recent", live: true, interval: 30, pageSize: 50, runtime: "podman", showEmpty: false, tool: "pip", os: "linux", show: "all", sidebar: 280, selected: "/recent", expanded: [] };
+const CHOICES = { theme: ["system", "light", "dark"], sort: ["recent", "name"], runtime: ["podman", "docker"], tool: ["pip", "uv"], os: ["linux", "windows"], show: ["all", "containers", "python"], interval: [10, 30, 60, 300], pageSize: [25, 50, 100, 200] };
 const MAX_EXPANDED = 500;
 const SIDEBAR = [180, 640];
 let prefs = { ...DEFAULTS };
@@ -83,6 +83,9 @@ const ICONS = {
   box: [["s", "M3 3h10v10H3z"]],
   artifact: [["s", "M8 1.8l5.5 3v6.4L8 14.2l-5.5-3V4.8zM2.5 4.8L8 7.8l5.5-3M8 7.8v6.4"]],
   clock: [["s", "M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zM8 4.8V8l2.2 1.4"]],
+  pkg: [["s", "M8 1.8l5.5 3v6.4L8 14.2l-5.5-3V4.8zM2.5 4.8L8 7.8l5.5-3M8 7.8v6.4"]],
+  tag: [["s", "M2 2.5h5.2l6.3 6.3-4.7 4.7L2.5 7.2V2.5zM5 5h.01"]],
+  pypi: [["", "M8 1.5l5.6 3.1L8 7.7 2.4 4.6z"], ["s", "M2.4 5.5v5.9L8 14.5V8.6zM13.6 5.5v5.9L8 14.5"]],
 };
 const iconCache = new Map();
 function icon(name, cls) { // built once per name and class, then cloned: a long tree makes thousands of them
@@ -108,7 +111,7 @@ async function api(path, body) {
   const opt = body ? { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": cfg.csrf }, body: JSON.stringify(body) } : {};
   const r = await fetch(path, opt);
   const j = await r.json();
-  if (!r.ok) throw new Error(j.error || r.statusText);
+  if (!r.ok) throw Object.assign(new Error(j.error || r.statusText), { status: r.status });
   return j;
 }
 
@@ -161,7 +164,7 @@ function paged(rows, headers) {
 // Nodes: root (the registry), node (a path segment, a folder, a repository or both), tag, plat (one platform of an index).
 // Only what is expanded is rendered, and tags and platforms are fetched when their parent first opens.
 const tree = {
-  root: null, byId: new Map(), byPath: new Map(), sel: null, focus: null,
+  root: null, proot: null, byKey: new Map(), byId: new Map(), byPath: new Map(), sel: null, focus: null,
   filter: "", matches: null, closed: new Set(), flashes: new Map(), tagIndex: new Map(), empty: new Set(), emptyKey: "", tm: new Map(), pathHit: new Set(), indexStale: true, truncated: false,
 };
 const expanded = new Set();
@@ -214,6 +217,9 @@ function applyCatalog(names, flashNew) {
   return changed;
 }
 function kidsOf(n) {
+  if (n.kind === "proot") return pkgSort(n.kids);
+  if (n.kind === "pkg") return n.verList;
+  if (n.kind === "ver") return [];
   if (n.kind === "tag") return n.plats || [];
   if (n.kind === "plat") return [];
   const k = visibleKids(n);
@@ -239,7 +245,7 @@ function isHidden(n) { // an empty repository, or a folder that holds only those
 }
 const visibleKids = (n) => folderKids(n).filter((k) => !isHidden(k));
 function expandable(n) {
-  if (n.kind === "root") return true;
+  if (n.kind === "root" || n.kind === "proot" || n.kind === "pkg") return true;
   if (n.kind === "node") return n.kids.size > 0 || n.repo;
   if (n.kind === "tag") return n.index !== false && (n.plats === null || n.plats.length > 0); // a tag that is not an index has no platforms to show
   return false;
@@ -250,6 +256,7 @@ const AUTO_OPEN_MAX = 10;
 const tagOnly = (n) => n.kind === "node" && n.repo && tree.tm.has(n.path) && !tree.pathHit.has(n.path);
 const autoOpen = (n) => !!tree.filter && (folderLike(n) || (tagOnly(n) && tree.tm.size <= AUTO_OPEN_MAX));
 function isOpen(n) {
+  if (n.kind === "pkg" && tree.filter && verHit(n, tree.filter.toLowerCase())) return !tree.closed.has(n.id); // a version matched
   if (autoOpen(n)) return !tree.closed.has(n.id);
   return expanded.has(n.id);
 }
@@ -366,7 +373,7 @@ function visible() {
   rows = [];
   const filtering = !!tree.filter, ok = filtering ? matchSet() : null;
   if (tree.indexStale && (filtering || !prefs.showEmpty)) loadTagIndex();
-  if (filtering && !ok.size) { rows.push({ info: "No repositories or tags match" + (tree.truncated ? " (tag search covers only the first 5000 tags)" : ""), depth: 0, anc: [], last: true }); return; }
+  if (filtering && !ok.size && showsType("containers")) { rows.push({ info: "No repositories or tags match" + (tree.truncated ? " (tag search covers only the first 5000 tags)" : ""), depth: 0, anc: [], last: true }); pypiRows(); return; }
   const walk = (n, depth, anc, pos, count, last) => {
     rows.push({ n, depth, anc, pos, count, last });
     if (!isOpen(n)) return;
@@ -382,7 +389,8 @@ function visible() {
     if (n.kind === "node" && n.repo && (n.loading || n.err)) rows.push({ info: n.err || "Loading...", depth: depth + 1, anc: down, last: true });
     if (n.kind === "tag" && n.plats === null) rows.push({ info: "Loading...", depth: depth + 1, anc: down, last: true });
   };
-  walk(tree.root, 0, [], 1, 1, true);
+  if (showsType("containers")) walk(tree.root, 0, [], 1, 1, true);
+  pypiRows();
   if (filtering && tree.truncated) rows.push({ info: "Tag search covers only the first 5000 tags.", depth: 0, anc: [], last: true });
 }
 function guidesFor(r) { // the connector lines of a row: a vertical for each ancestor with more siblings, then the elbow
@@ -393,15 +401,19 @@ function guidesFor(r) { // the connector lines of a row: a vertical for each anc
 }
 function iconFor(n, open) {
   if (n.kind === "root") return icon("registry");
+  if (n.kind === "proot") return icon("pypi");
+  if (n.kind === "pkg") return icon("pkg");
+  if (n.kind === "ver") return icon("tag");
   if (n.kind === "tag") return kindIcon(tagKind(n));
   if (n.kind === "plat") return icon("chip");
   return icon(open ? "folderOpen" : "folder");
 }
 function rowTitle(n) {
   if (n.kind === "root") return cfg.registry || "";
+  if (n.kind === "proot") return pypiLabel();
   return n.kind === "node" ? n.path : n.name;
 }
-const rowLabel = (n) => (n.kind === "root" ? (cfg.registry || "Registry").replace(/^https?:\/\//, "") : n.name);
+const rowLabel = (n) => (n.kind === "root" ? (cfg.registry || "Registry").replace(/^https?:\/\//, "") : n.kind === "proot" ? pypiLabel() : n.name);
 function rowEl(r) {
   const n = r.n, guides = guidesFor(r);
   if (r.info) return el("div", { className: "row info", role: "none" }, ...guides, el("span", { className: "chev" }), el("span", { className: "lbl", textContent: r.info }));
@@ -463,6 +475,9 @@ function select(id, reveal) {
 
 function hashOf(n) {
   if (n.kind === "recent") return "#/recent";
+  if (n.kind === "proot") return "#/pypi";
+  if (n.kind === "pkg") return "#/pypi/" + n.key;
+  if (n.kind === "ver") return `#/pypi/${n.parent.key}@${n.version}`;
   if (n.kind === "root") return "#/";
   if (n.kind === "node") return (n.repo ? "#/repo/" : "#/dir/") + n.path;
   if (n.kind === "tag") return `#/repo/${n.parent.path}:${n.tag}`;
@@ -887,9 +902,9 @@ function lazyHit(entries) {
 function lazyPump() {
   while (lazy.active < LAZY_MAX && lazy.queue.length) {
     const r = lazy.queue.shift();
-    if (r.done || !tree.byId.has(r.t.id)) continue;
+    if (r.done || (r.t && !tree.byId.has(r.t.id))) continue;
     lazy.active++;
-    getManifest(r.t.parent.path, r.t.tag, r.t.digest).then(r.apply).catch(() => { /* the row keeps its blanks */ }).finally(() => { lazy.active--; lazyPump(); if (!lazy.active && !lazy.queue.length) lazy.redraw?.(); });
+    (r.load ? r.load() : getManifest(r.t.parent.path, r.t.tag, r.t.digest)).then(r.apply).catch(() => { /* the row keeps its blanks */ }).finally(() => { lazy.active--; lazyPump(); if (!lazy.active && !lazy.queue.length) lazy.redraw?.(); });
   }
 }
 function lazyWatch(r) {
@@ -956,16 +971,33 @@ function childrenList(n) {
 }
 
 function recentPane() {
-  const rows = recent.events.map((e) => el("tr", {},
-    el("td", { textContent: ago(e.t), title: new Date(e.t * 1000).toLocaleString() }),
-    el("td", {}, el("span", { className: "badge " + e.type, textContent: e.type })),
-    el("td", {}, e.type === "deleted" ? code(e.ref) : el("a", { href: "#/repo/" + e.ref, textContent: e.ref })),
-    el("td", {}, code(short(e.digest || e.prev)))));
-  const note = (recent.persistent ? "History is saved to disk." : "History is in memory only and resets when the UI restarts.")
-    + ` Watching since ${new Date(recent.since * 1000).toLocaleString()}. Times are when the UI saw the change, not when it was pushed or built.`;
+  // Container changes come from the poller's history; PyPI uploads carry GitLab's upload time. One list, newest first.
+  const items = [];
+  if (showsType("containers")) {
+    for (const e of recent.events) items.push({ t: e.t, el: () => el("tr", {},
+      el("td", { textContent: ago(e.t), title: new Date(e.t * 1000).toLocaleString() }),
+      el("td", {}, el("span", { className: "ico" }, icon("whale", "whale")), el("span", { className: "badge " + e.type, textContent: e.type })),
+      el("td", {}, e.type === "deleted" ? code(e.ref) : el("a", { href: "#/repo/" + e.ref, textContent: e.ref })),
+      el("td", {}, code(short(e.digest || e.prev)))) });
+  }
+  if (cfg.pypi && showsType("python") && pypi.loaded) {
+    for (const u of pypi.packages) {
+      const pkg = tree.byKey.get(u.key), ver = pkg?.versions.get(u.version);
+      items.push({ t: secs(u.created) || 0, el: () => el("tr", {},
+        el("td", { textContent: ago(secs(u.created)), title: u.created ? new Date(u.created).toLocaleString() : "" }),
+        el("td", {}, el("span", { className: "ico" }, icon("pypi")), el("span", { className: "badge new", textContent: "upload" })),
+        el("td", {}, ver ? link(ver, `${u.name}==${u.version}`) : code(`${u.name}==${u.version}`)),
+        el("td", { className: "mut", textContent: u.project })) });
+    }
+  }
+  items.sort((x, y) => y.t - x.t);
+  const parts = [];
+  if (showsType("containers")) parts.push((recent.persistent ? "Container history is saved to disk." : "Container history is in memory only and resets when the UI restarts.")
+    + ` Watching since ${new Date(recent.since * 1000).toLocaleString()}; times are when the UI saw the change.`);
+  if (cfg.pypi && showsType("python")) parts.push(pypi.denied ? "Log in to see Python uploads." : "Python upload times come from GitLab.");
   const empty = recent.baselined ? "No changes seen yet." : "Reading the registry for the first time.";
-  showMain(el("h2", { textContent: "Recent changes" }), el("p", { className: "mut", textContent: note }),
-    ...(rows.length ? paged(rows, ["When", "Change", "Image", "Digest"]) : [el("p", { className: "mut", textContent: empty })]));
+  showMain(el("h2", { textContent: "Recent changes" }), el("p", { className: "mut", textContent: parts.join(" ") }),
+    ...(items.length ? paged(items.map((i) => i.el()), ["When", "Change", "Item", "Detail"]) : [el("p", { className: "mut", textContent: empty })]));
 }
 function rootPane(n) {
   const repos = tree.names.filter((p) => !isHidden(tree.byPath.get(p))).length, hidden = tree.names.length - repos;
@@ -1092,6 +1124,9 @@ async function drawPane(n, seq) {
   if (!n) return notFoundPane();
   if (n === RECENT) return recentPane();
   if (n.kind === "root") return rootPane(n);
+  if (n.kind === "proot") return prootPane(n);
+  if (n.kind === "pkg") return pkgPane(n);
+  if (n.kind === "ver") return verPane(n);
   if (n.kind !== "node") return manifestPane(n, seq);
   if (!n.repo) return folderPane(n);
   await ensureTags(n);
@@ -1120,12 +1155,21 @@ function parseHash() {
   try { h = decodeURIComponent(location.hash.slice(1)) || prefs.selected; } catch (e) { /* malformed escape: show the registry */ }
   const m = /^\/(?:repo|dir)\/([^:@]+)(?::([^@]+))?(?:@(.+))?$/.exec(h);
   if (h === "/recent") return { kind: "recent" };
+  if (h === "/pypi") return { kind: "proot" };
+  const py = /^\/pypi\/([^@]+)(?:@(.+))?$/.exec(h);
+  if (py) return { kind: "pypi", key: py[1].toLowerCase().replace(/[-_.]+/g, "-"), version: py[2] };
   return m ? { kind: "path", path: m[1], tag: m[2], digest: m[3] } : { kind: "root" };
 }
 let navSeq = 0;
 async function resolve(r) {
   if (r.kind === "recent") return RECENT;
   if (r.kind === "root") return tree.root;
+  if (r.kind === "proot") return cfg.pypi ? tree.proot : null;
+  if (r.kind === "pypi") {
+    if (!pypi.loaded) await pypiSync();
+    const p = tree.byKey.get(r.key);
+    return p && r.version ? p.versions.get(r.version) : p;
+  }
   let n = tree.byPath.get(r.path);
   if (!n) { await sync(); n = tree.byPath.get(r.path); }
   if (!n || !r.tag) return n;
@@ -1237,6 +1281,7 @@ function startLive() {
       else syncSoon();
     };
     es.onerror = () => { state = "connecting"; liveLabel(); }; // the browser reconnects by itself
+    es.addEventListener("pypi", () => { if (document.hidden) stale = true; else void pypiSync(); });
   }
   liveLabel();
 }
@@ -1247,9 +1292,10 @@ function startPoll() { // the fallback while the stream is down, every `interval
     if (!prefs.live || document.hidden || modalOpen()) return;
     if (state === "live") return;
     try { const r = await api("/api/recent?limit=1"); if (r.seq !== lastSeq) void sync(); } catch (e) { /* shown by the next sync() */ }
+    if (cfg.pypi && !pypi.denied) try { const r = await api("/api/pypi/seq"); if (r.seq !== pypi.seq) void pypiSync(); } catch (e) { /* shown by the next pypiSync() */ }
   }, 1000 * Math.max(5, prefs.interval));
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden && stale) { stale = false; void sync(); } });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && stale) { stale = false; void sync(); void pypiSync(); } });
 
 // ---- Copy to / Move to: source card, destination path with a folder picker, promote chips, tag and a preview -----------------
 // The same name rules as the server (registry.py), so a bad name is caught while typing. The server stays the authority.
@@ -1595,7 +1641,7 @@ function helpPanel() {
 }
 
 // ---- Settings: one panel, changes apply as you make them ----------------------------------------------------------------
-const SETTING_KEYS = ["theme", "runtime", "sort", "live", "interval", "pageSize", "showEmpty"];
+const SETTING_KEYS = ["theme", "runtime", "tool", "os", "show", "sort", "live", "interval", "pageSize", "showEmpty"];
 function segmented(labelId, options, key, apply) { // options: [value, text, iconName?]. Arrow keys move and select, like radio buttons.
   const box = el("div", { className: "seg", role: "radiogroup", "aria-labelledby": labelId });
   const draw = () => box.replaceChildren(...options.map(([v, text, ico]) => el("button", {
@@ -1641,8 +1687,8 @@ function applyPrefs(change) { // save a change and do what it needs, at once
   if (prefs.theme !== before.theme) applyTheme();
   if (prefs.live !== before.live) startLive();
   if (prefs.interval !== before.interval) startPoll();
-  if (prefs.showEmpty !== before.showEmpty) { resetHidden(); renderTree(); }
-  if (prefs.runtime !== before.runtime || prefs.sort !== before.sort || prefs.pageSize !== before.pageSize || prefs.showEmpty !== before.showEmpty) { resetShown(); void renderPane(true); }
+  if (prefs.showEmpty !== before.showEmpty || prefs.show !== before.show) { resetHidden(); renderTree(); drawTypes(); }
+  if (prefs.runtime !== before.runtime || prefs.tool !== before.tool || prefs.os !== before.os || prefs.show !== before.show || prefs.sort !== before.sort || prefs.pageSize !== before.pageSize || prefs.showEmpty !== before.showEmpty) { resetShown(); void renderPane(true); }
 }
 function settings() {
   const controls = [];
@@ -1666,7 +1712,9 @@ function settings() {
     el("div", { className: "sbody" },
       el("p", { className: "mut", textContent: "Saved in this browser only." }),
       section("Appearance", row("s-theme", "Theme", "System, light or dark.", segmented("s-theme", [["system", "System", "monitor"], ["light", "Light", "sun"], ["dark", "Dark", "moon"]], "theme", apply))),
-      section("Commands", row("s-rt", "Command line tool", "Used in the copyable commands.", segmented("s-rt", [["podman", "podman"], ["docker", "docker"]], "runtime", apply))),
+      section("Commands", row("s-rt", "Container tool", "Used in the copyable container commands.", segmented("s-rt", [["podman", "podman"], ["docker", "docker"]], "runtime", apply)),
+        ...(cfg.pypi ? [row("s-tool", "Python installer", "Used in the copyable Python commands.", segmented("s-tool", [["pip", "pip"], ["uv", "uv"]], "tool", apply)),
+          row("s-os", "Operating system", "Linux and macOS get shell commands, Windows gets PowerShell.", segmented("s-os", [["linux", "Linux/macOS"], ["windows", "Windows"]], "os", apply))] : [])),
       section("Lists", row("s-sort", "Sort by", "Order of tags and folders in lists.", segmented("s-sort", [["recent", "Recent"], ["name", "Name"]], "sort", apply)),
         row("s-rows", "Rows per page", "Rows a list shows before Show more.", selectEl("s-rows", "pageSize", CHOICES.pageSize, String, apply)),
         row("s-empty", "Show empty repositories", "Repositories with no tags. The registry cannot delete them.", switchEl("s-empty", "showEmpty", apply))),
@@ -1682,6 +1730,448 @@ function settings() {
   dlg.showModal();
 }
 
+// ---- PyPI source: one GitLab group's PyPI packages (server/pypi.py), shown as a second root in the tree ----------------------------
+// Nodes: proot (the group), pkg (a project name, as pip normalises it), ver (one version of it, across every GitLab project).
+let pypi = { packages: [], seq: 0, group: null, truncated: false, loaded: null, error: "", denied: false };
+const pypiFiles = new Map(); // upload id -> files, or a promise while loading
+const secs = (iso) => (iso ? Date.parse(iso) / 1000 : null);
+const when = (iso, never = "") => (iso ? el("span", { title: new Date(iso).toLocaleString(), textContent: ago(secs(iso)) }) : never);
+const uniq = (xs) => [...new Set(xs.filter(Boolean))];
+const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+const shortProject = (p) => p.split("/").pop();
+const showsType = (t) => prefs.show === "all" || prefs.show === t; // the sidebar's type filter: all, containers or python
+
+// Versions in PEP 440 order: 1.0.dev1 < 1.0a1 < 1.0b2 < 1.0rc1 < 1.0 < 1.0.post1, numeric parts compared as numbers.
+const PEP440 = /^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:[-_.]?(a|alpha|b|beta|c|rc|pre|preview)[-_.]?(\d*))?(?:-(\d+)|[-_.]?(?:post|rev|r)[-_.]?(\d*))?(?:[-_.]?dev[-_.]?(\d*))?(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?$/i;
+const PRE = { a: 0, alpha: 0, b: 1, beta: 1, c: 2, rc: 2, pre: 2, preview: 2 };
+const verKeys = new Map();
+function verKey(v) {
+  if (verKeys.has(v)) return verKeys.get(v);
+  const m = PEP440.exec(v);
+  let k = null;
+  if (m) {
+    const post = m[5] ?? m[6], dev = m[7];
+    const pre = m[3] ? [PRE[m[3].toLowerCase()], +(m[4] || 0)] : dev !== undefined && post === undefined ? [-1, 0] : [3, 0];
+    k = { epoch: +(m[1] || 0), rel: m[2].split(".").map(Number), rest: [...pre, post === undefined ? -1 : +(post || 0), dev === undefined ? 1 : 0, +(dev || 0)] };
+  }
+  verKeys.set(v, k);
+  return k;
+}
+function verCompare(a, b) { // ascending; versions pip cannot parse go after those it can
+  const x = verKey(a), y = verKey(b);
+  if (x && y) return x.epoch - y.epoch || cmpNums(x.rel, y.rel) || cmpNums(x.rest, y.rest) || collator.compare(a, b);
+  if (x) return -1;
+  if (y) return 1;
+  return collator.compare(a, b);
+}
+const isPre = (v) => { const k = verKey(v); return !!k && (k.rest[0] < 3 || k.rest[3] === 0); }; // a pre-release or dev release
+
+const latestUpload = (rows) => rows.reduce((a, b) => ((b.created || "") > (a.created || "") ? b : a));
+// Rebuild packages and versions from the upload list. Nodes keep their identity, so open ones stay open. Returns the ids that are new.
+function applyPypi(list, flashNew) {
+  const fresh = new Set(), groups = new Map();
+  for (const p of list) {
+    if (!groups.has(p.key)) groups.set(p.key, []);
+    groups.get(p.key).push(p);
+  }
+  for (const [key, uploads] of groups) {
+    let n = tree.byKey.get(key);
+    if (!n) {
+      n = mk("pkg", "k:" + key, uploads[0].name, tree.proot, { key, versions: new Map() });
+      tree.byKey.set(key, n);
+      fresh.add(n.id);
+    }
+    n.uploads = uploads;
+    n.name = latestUpload(uploads).name; // the spelling of the newest upload
+    const byVer = new Map();
+    for (const u of uploads) {
+      if (!byVer.has(u.version)) byVer.set(u.version, []);
+      byVer.get(u.version).push(u);
+    }
+    for (const [v, us] of byVer) {
+      let vn = n.versions.get(v);
+      if (!vn) {
+        vn = mk("ver", `v:${key}@${v}`, v, n, { version: v });
+        n.versions.set(v, vn);
+        fresh.add(vn.id);
+      }
+      vn.uploads = us.sort((a, b) => (b.created || "").localeCompare(a.created || "") || a.project.localeCompare(b.project));
+      vn.created = vn.uploads[0].created;
+      vn.downloaded = us.map((u) => u.downloaded).filter(Boolean).sort().pop() || null;
+    }
+    for (const [v, vn] of n.versions) if (!byVer.has(v)) { n.versions.delete(v); tree.byId.delete(vn.id); }
+    n.verList = [...n.versions.values()].sort((a, b) => verCompare(b.version, a.version));
+    n.latest = (n.verList.find((x) => !isPre(x.version)) || n.verList[0]).version; // what pip installs without --pre
+    n.created = n.uploads.map((u) => u.created).filter(Boolean).sort().pop() || null;
+    n.downloaded = n.uploads.map((u) => u.downloaded).filter(Boolean).sort().pop() || null;
+    n.projects = [...new Set(n.uploads.map((u) => u.project))].sort();
+  }
+  for (const [key, n] of tree.byKey) {
+    if (!groups.has(key)) { tree.byKey.delete(key); tree.byId.delete(n.id); for (const vn of n.versions.values()) tree.byId.delete(vn.id); }
+  }
+  tree.proot.kids = [...tree.byKey.values()];
+  if (flashNew) for (const id of fresh) flash(tree.byId.get(id));
+  return fresh;
+}
+const pypiLabel = () => "PyPI · " + (pypi.group ? pypi.group.path : cfg.pypi?.groupRef || "");
+const pkgSort = (list) => [...list].sort(prefs.sort === "recent" ? (a, b) => (b.created || "").localeCompare(a.created || "") || byName(a, b) : byName);
+const pkgHit = (n, term) => n.key.includes(term) || n.name.toLowerCase().includes(term);
+const verHit = (n, term) => !pkgHit(n, term) && n.verList.some((v) => v.version.toLowerCase().includes(term));
+// The PyPI rows of the tree, after the registry's: the same row shape, so rendering and keys work unchanged.
+function pypiRows() {
+  if (!cfg.pypi || !showsType("python")) return;
+  const term = tree.filter.toLowerCase(), root = tree.proot;
+  rows.push({ n: root, depth: 0, anc: [], pos: 1, count: 1, last: true });
+  if (!isOpen(root)) return;
+  if (pypi.denied) { rows.push({ info: "Log in to see Python packages", depth: 1, anc: [], last: true }); return; }
+  if (!pypi.loaded) { rows.push({ info: pypi.error || "Loading...", depth: 1, anc: [], last: true }); return; }
+  let kids = pkgSort(root.kids);
+  if (term) kids = kids.filter((k) => pkgHit(k, term) || verHit(k, term));
+  if (term && !kids.length) rows.push({ info: "No packages or versions match", depth: 1, anc: [], last: true });
+  kids.forEach((k, i) => {
+    const last = i === kids.length - 1;
+    rows.push({ n: k, depth: 1, anc: [], pos: i + 1, count: kids.length, last });
+    if (!isOpen(k)) return;
+    const vers = term && verHit(k, term) ? k.verList.filter((v) => v.version.toLowerCase().includes(term)) : k.verList;
+    vers.forEach((v, j) => rows.push({ n: v, depth: 2, anc: [!last], pos: j + 1, count: vers.length, last: j === vers.length - 1 }));
+  });
+}
+
+// ---- PyPI files: fetched per upload when a row scrolls into view, through the same lazy queue as the registry's manifests ---------
+function filesOf(u) {
+  if (!pypiFiles.has(u.id)) {
+    const p = api(`/api/pypi/files?id=${u.id}`).then((fs) => { pypiFiles.set(u.id, fs); return fs; }, (e) => { pypiFiles.delete(u.id); throw e; });
+    pypiFiles.set(u.id, p);
+  }
+  return Promise.resolve(pypiFiles.get(u.id));
+}
+const loadedFiles = (u) => { const f = pypiFiles.get(u.id); return Array.isArray(f) ? f : null; };
+const platLabel = (p) => (p.os === "any" ? "any" : `${p.os.split(" ")[0]} ${p.arch}`);
+const summary = (fs) => ({
+  platforms: uniq(fs.flatMap((f) => f.platforms.map(platLabel))).join(", "),
+  requires: uniq(fs.map((f) => f.requires)).join(", "),
+  built: uniq(fs.map((f) => f.python)).join(", "),
+  size: fs.reduce((n, f) => n + (f.size || 0), 0),
+  count: fs.length,
+});
+// A version over every copy of it: Requires-Python as recorded by any copy, and how many copies lack it.
+function versionSummary(v) {
+  const all = v.uploads.map(loadedFiles);
+  if (all.some((fs) => !fs)) return null;
+  const s = summary(all[0]);
+  s.missing = all.filter((fs) => fs.length && fs.every((f) => !f.requires)).length;
+  s.requires = uniq(all.flat().map((f) => f.requires)).join(", ");
+  return s;
+}
+
+// ---- PyPI commands: Install, Configure and Upload, for pip or uv, on Linux/macOS (shell) or Windows (PowerShell) ----------------
+// Checked against pip 26.2, uv 0.13 and twine 7.0: uv takes --default-index and UV_DEFAULT_INDEX (UV_INDEX_URL is deprecated),
+// and pip and uv both read ~/.netrc on every OS. <TOKEN> marks where a token goes; this page never holds one.
+const pypiHost = () => (cfg.pypi?.gitlab || "").replace(/^https?:\/\//, "");
+const groupIndex = () => `${cfg.pypi.gitlab}/api/v4/groups/${pypi.group ? pypi.group.id : "<GROUP_ID>"}/-/packages/pypi/simple`;
+const projectIndex = (id) => `${cfg.pypi.gitlab}/api/v4/projects/${id}/packages/pypi/simple`;
+const publicIndex = () => cfg.pypi?.indexAuth === "none"; // GitLab serves the index without a login
+const withToken = (url) => (publicIndex() ? url : url.replace(/^(https?:\/\/)/, "$1__token__:<TOKEN>@"));
+let pyTab = "install";
+function pypiCommandSets({ name, version, project }) {
+  const spec = name ? (version ? `${name}==${version}` : name) : "<package>";
+  const index = withToken(groupIndex());
+  const win = prefs.os === "windows";
+  const pipOf = (tool) => (tool === "uv" ? "uv pip" : win ? "py -m pip" : "python3 -m pip");
+  const indexFlag = (tool) => (tool === "uv" ? "--default-index" : "--index-url");
+  const install = (tool) => [
+    cmdNote("From the group index, which lists every project's packages. GitLab asks pypi.org for anything it does not hold, if the group allows it."),
+    codeBlock("Install", [`${pipOf(tool)} install ${indexFlag(tool)} ${index} ${spec}`]),
+    ...(version ? [cmdNote(tool === "uv" ? "Download the files only, without installing. uv has no download command, so this is pip." : "Download the files only, without installing."),
+      codeBlock("Download", [`${pipOf("pip")} download --no-deps --index-url ${index} ${spec}`])] : []),
+    ...(project ? [cmdNote("From one project's index only, when several projects hold the same version."), codeBlock("Install from this project", [`${pipOf(tool)} install ${indexFlag(tool)} ${withToken(projectIndex(project))} ${spec}`])] : [])];
+  const netrcLine = `machine ${pypiHost().split("/")[0]} login __token__ password <TOKEN>`;
+  const configure = (tool) => {
+    const idx = tool === "uv"
+      ? (win ? codeBlock("uv (PowerShell, kept for your user)", [`[Environment]::SetEnvironmentVariable("UV_DEFAULT_INDEX", "${groupIndex()}", "User")`])
+        : codeBlock("uv (add to ~/.profile to keep it)", [`export UV_DEFAULT_INDEX=${groupIndex()}`]))
+      : codeBlock("pip (written to your user's pip config)", [`${pipOf("pip")} config --user set global.index-url ${groupIndex()}`]);
+    const netrc = win
+      ? [cmdNote("Keep the token out of the URL and out of shell history: put it in %USERPROFILE%\\.netrc, which pip and uv both read."),
+        codeBlock(".netrc (PowerShell)", [`Add-Content -Path "$HOME\\.netrc" -Value "${netrcLine}"`])]
+      : [cmdNote("Keep the token out of the URL and out of shell history: put it in ~/.netrc, which pip and uv both read."),
+        codeBlock("~/.netrc", [`printf '%s\\n' '${netrcLine}' >> ~/.netrc`, "chmod 600 ~/.netrc"])];
+    return [cmdNote("Set the index once instead of passing it every time. Prefer index-url over extra-index-url: with an extra index, pip may take a public package of the same name instead of yours."),
+      idx, ...(publicIndex() ? [] : netrc), ...(win ? [cmdNote("Open a new PowerShell window afterwards: a variable set for your user reaches new windows only.")] : [])];
+  };
+  const upload = () => {
+    const url = `${cfg.pypi.gitlab}/api/v4/projects/${project || "<PROJECT_ID>"}/packages/pypi`;
+    return [cmdNote(project ? `Upload to the project that holds the newest ${name}. A token with write_package_registry.` : "Upload to a project's index: its numeric id is on the project page. A token with write_package_registry."),
+      win ? codeBlock("twine (PowerShell)", ['$env:TWINE_USERNAME = "__token__"', '$env:TWINE_PASSWORD = "<TOKEN>"', `py -m twine upload --repository-url ${url} dist\\*`])
+        : codeBlock("twine", [`TWINE_USERNAME=__token__ TWINE_PASSWORD=<TOKEN> python3 -m twine upload --repository-url ${url} dist/*`]),
+      cmdNote("In a GitLab pipeline the username must be gitlab-ci-token, with the job's own token."),
+      codeBlock("twine in .gitlab-ci.yml", ["TWINE_USERNAME=gitlab-ci-token TWINE_PASSWORD=${CI_JOB_TOKEN} python3 -m twine upload --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi dist/*"]),
+      cmdNote("twine sends Requires-Python from the wheel's metadata. A bare curl upload does not, and pip then cannot tell which Python a version needs.")];
+  };
+  return { names: [["install", "Install"], ["configure", "Configure"], ["upload", "Upload"]], content: { install, configure, upload } };
+}
+function pypiCommandsEl(ctx, heading) {
+  const names = pypiCommandSets(ctx).names;
+  const tabs = el("div", { role: "tablist", className: "tabs", "aria-label": "Command helpers" });
+  const seg = el("div", { className: "seg", role: "group", "aria-label": "Installer" });
+  const osSeg = el("div", { className: "seg", role: "group", "aria-label": "Operating system" });
+  const panel = el("div", { role: "tabpanel", className: "cmd-panel" });
+  const draw = () => {
+    const cur = names.some(([k]) => k === pyTab) ? pyTab : names[0][0];
+    tabs.replaceChildren(...names.map(([k, text]) => el("button", {
+      type: "button", role: "tab", textContent: text, id: "ptab-" + k, tabIndex: k === cur ? 0 : -1, "aria-selected": String(k === cur), "aria-controls": "pcmd-panel",
+      onclick: () => { pyTab = k; draw(); },
+      onkeydown: (e) => {
+        const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+        if (!d) return;
+        e.preventDefault();
+        pyTab = names[(names.findIndex((x) => x[0] === k) + d + names.length) % names.length][0];
+        draw();
+        $("ptab-" + pyTab).focus();
+      },
+    })));
+    seg.hidden = cur === "upload";
+    seg.replaceChildren(...CHOICES.tool.map((t) => el("button", { type: "button", textContent: t, "aria-pressed": String(t === prefs.tool), onclick: () => { prefs.tool = t; savePrefs(); draw(); } })));
+    osSeg.replaceChildren(...[["linux", "Linux/macOS"], ["windows", "Windows"]].map(([o, text]) => el("button", { type: "button", textContent: text, "aria-pressed": String(o === prefs.os), onclick: () => { prefs.os = o; savePrefs(); draw(); } })));
+    panel.id = "pcmd-panel";
+    panel.setAttribute("aria-labelledby", "ptab-" + cur);
+    panel.replaceChildren(...pypiCommandSets(ctx).content[cur](prefs.tool)); // built again: the OS choice changes every command
+  };
+  draw();
+  return el("section", { className: "cmds" }, el("h3", { textContent: heading }), el("div", { className: "cmd-bar" }, tabs, el("div", { className: "segs" }, osSeg, seg)), panel);
+}
+
+// ---- PyPI panes ----------------------------------------------------------------------------------------------------------
+function pypiCrumbs(n) {
+  const parts = [];
+  for (let x = n; x && x.kind !== "proot"; x = x.parent) parts.unshift(x);
+  return el("nav", { className: "crumbs", "aria-label": "Path" }, el("a", { href: "#/pypi", textContent: pypiLabel() }),
+    ...parts.map((x, i) => (i === parts.length - 1 ? el("span", { className: x.kind === "ver" ? "t" : "", textContent: x.kind === "ver" ? "==" + x.name : x.name })
+      : el("a", { href: hashOf(x), textContent: x.name }))));
+}
+const gitlabLink = (path, text) => (path ? el("a", { href: cfg.pypi.gitlab + path, target: "_blank", rel: "noopener noreferrer", textContent: text }) : null);
+const stats = (...items) => el("p", { className: "stats" }, ...items.filter(Boolean).map((t) => el("span", { className: "stat", textContent: t })));
+const paneTabs = new Map(); // the chosen tab per view, for this page's life
+function tabSet(id, tabs) { // tabs: [key, label, build() -> nodes]
+  const bar = el("div", { role: "tablist", className: "tabs panetabs", "aria-label": "Sections" }), panel = el("div", { role: "tabpanel", className: "tabpanel" });
+  const draw = (focus) => {
+    const cur = tabs.some(([k]) => k === paneTabs.get(id)) ? paneTabs.get(id) : tabs[0][0];
+    bar.replaceChildren(...tabs.map(([k, label]) => el("button", {
+      type: "button", role: "tab", textContent: label, id: `pt-${k}`, tabIndex: k === cur ? 0 : -1, "aria-selected": String(k === cur),
+      onclick: () => { paneTabs.set(id, k); draw(); },
+      onkeydown: (e) => {
+        const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+        if (!d) return;
+        e.preventDefault();
+        paneTabs.set(id, tabs[(tabs.findIndex((t) => t[0] === k) + d + tabs.length) % tabs.length][0]);
+        draw(true);
+      },
+    })));
+    panel.setAttribute("aria-labelledby", "pt-" + cur);
+    lazyReset();
+    panel.replaceChildren(...[tabs.find((t) => t[0] === cur)[2]()].flat());
+    if (focus) bar.querySelector("[aria-selected=true]").focus();
+  };
+  draw();
+  return [bar, panel];
+}
+function pypiNotice(n) { // in place of a pane when the list cannot be shown
+  if (pypi.denied) return [pypiCrumbs(n), el("h2", { textContent: "Python packages" }), el("p", { className: "mut" }, "Log in to see the Python packages. ", ...(cfg.login ? [el("a", { href: cfg.login, textContent: "Log in" })] : []))];
+  if (!pypi.loaded) return [pypiCrumbs(n), el("h2", { textContent: "Python packages" }), el("p", { className: "mut", textContent: pypi.error || "Reading the group from GitLab..." })];
+  return null;
+}
+function prootPane(n) {
+  const blocked = pypiNotice(n);
+  if (blocked) return showMain(...blocked);
+  const pkgs = n.kids, projects = uniq(pypi.packages.map((u) => u.project));
+  showMain(pypiCrumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("pypi")), pypiLabel()),
+    stats(plural(pkgs.length, "package"), plural(pypi.packages.length, "upload"), plural(projects.length, "project"), pypi.truncated ? "newest uploads only (UI_PYPI_MAX_PACKAGES)" : ""),
+    el("p", { className: "reporef" }, copyValue(groupIndex(), "Copy the group index URL")),
+    ...listView({
+      id: "pkgs", items: pkgs, tie: byName, defaultCmp: prefs.sort === "recent" ? (a, b) => (b.created || "").localeCompare(a.created || "") || byName(a, b) : byName,
+      columns: [
+        { key: "name", label: "Package", val: (p) => p.key, cmp: collator.compare },
+        { key: "latest", label: "Latest", val: (p) => p.latest, cmp: verCompare },
+        { key: "versions", label: "Versions", val: (p) => p.verList.length, cmp: numCmp },
+        { key: "projects", label: "Projects", val: (p) => p.projects.length, cmp: numCmp, tip: "GitLab projects that hold a copy" },
+        { key: "created", label: "Last upload", val: (p) => secs(p.created), cmp: numCmp },
+        { key: "downloaded", label: "Last download", val: (p) => secs(p.downloaded), cmp: numCmp },
+      ],
+      match: (p, t) => pkgHit(p, t), placeholder: "Filter packages",
+      row: (p) => el("tr", {}, el("td", {}, el("span", { className: "ico" }, icon("pkg"), link(p))), el("td", { className: "nw" }, code(p.latest)),
+        el("td", { textContent: p.verList.length }), el("td", { className: "mut", textContent: p.projects.length }),
+        el("td", { className: "mut" }, when(p.created)), el("td", { className: "mut" }, when(p.downloaded, "never"))),
+    }),
+    pypiCommandsEl({ name: "", version: "", project: "" }, "Use this index"));
+}
+function versionRow(v) { // a table row for a version, whose Python, platforms, files and size fill in from its copies
+  const req = el("td", { className: "mut nw" }), built = el("td", { className: "mut" }), plat = el("td", { className: "mut" }), count = el("td", { className: "mut" }), sz = el("td", { className: "mut nw" });
+  const r = { done: false, load: () => Promise.all(v.uploads.map(filesOf)) };
+  r.apply = () => {
+    const s = versionSummary(v);
+    if (!s) return;
+    req.replaceChildren(s.requires || "not recorded", ...(s.requires && s.missing ? [el("span", { className: "badge deleted", textContent: ` missing in ${s.missing} of ${v.uploads.length}` })] : []));
+    req.title = s.missing ? "Some copies were uploaded without Requires-Python, so pip cannot tell from them which Python this version needs" : "Requires-Python";
+    built.textContent = s.built;
+    plat.textContent = s.platforms;
+    count.textContent = s.count;
+    sz.textContent = size(s.size);
+    r.done = true;
+  };
+  r.apply();
+  r.tr = el("tr", {}, el("td", {}, el("span", { className: "ico" }, icon("tag"), link(v, v.version)), rowCopy(`${v.parent.name}==${v.version}`, `Copy ${v.parent.name}==${v.version}`)),
+    req, built, plat, count, sz, el("td", { className: "mut", textContent: v.uploads.length }),
+    el("td", { className: "mut" }, when(v.created)), el("td", { className: "mut" }, when(v.downloaded, "never")));
+  return r;
+}
+const fileSort = (key) => (v) => { const s = versionSummary(v); return s ? s[key] || null : null; };
+function projectsList(n) { // which GitLab projects hold a copy of the package, and of which versions
+  const rows = n.projects.map((path) => {
+    const ups = n.uploads.filter((u) => u.project === path);
+    const vers = ups.map((u) => u.version).sort(verCompare).reverse();
+    return { path, vers, created: ups.map((u) => u.created).filter(Boolean).sort().pop() || null, downloaded: ups.map((u) => u.downloaded).filter(Boolean).sort().pop() || null };
+  });
+  return listView({
+    id: "projects:" + n.key, items: rows, tie: (a, b) => collator.compare(a.path, b.path), defaultCmp: (a, b) => collator.compare(a.path, b.path),
+    columns: [
+      { key: "path", label: "Project", val: (r) => r.path, cmp: collator.compare },
+      { key: "count", label: "Versions", val: (r) => r.vers.length, cmp: numCmp },
+      { key: "newest", label: "Newest held", val: (r) => r.vers[0], cmp: verCompare },
+      { key: "created", label: "Last upload", val: (r) => secs(r.created), cmp: numCmp },
+      { key: "downloaded", label: "Last download", val: (r) => secs(r.downloaded), cmp: numCmp },
+    ],
+    match: (r, t) => r.path.toLowerCase().includes(t), placeholder: "Filter projects",
+    row: (r) => el("tr", {}, el("td", {}, gitlabLink(`/${r.path}/-/packages`, r.path)), el("td", { textContent: r.vers.length, title: r.vers.join(", ") }),
+      el("td", {}, link(n.versions.get(r.vers[0]), r.vers[0])), el("td", { className: "mut" }, when(r.created)), el("td", { className: "mut" }, when(r.downloaded, "never"))),
+  });
+}
+function pkgPane(n) {
+  const blocked = pypiNotice(n);
+  if (blocked) return showMain(...blocked);
+  const entries = new Map();
+  const entry = (v) => {
+    if (!entries.has(v)) entries.set(v, versionRow(v));
+    return entries.get(v);
+  };
+  const versions = () => listView({
+    id: "vers:" + n.key, items: n.verList, tie: (a, b) => verCompare(b.version, a.version), defaultCmp: (a, b) => verCompare(b.version, a.version),
+    columns: [
+      { key: "version", label: "Version", val: (v) => v.version, cmp: verCompare },
+      { key: "requires", label: "Requires Python", val: fileSort("requires"), cmp: collator.compare, tip: "Sorts loaded rows. Requires-Python, as the uploader recorded it" },
+      { key: "built", label: "Built for", val: fileSort("built"), cmp: collator.compare, tip: "Sorts loaded rows. From the wheel tags" },
+      { key: "platforms", label: "Platforms", val: fileSort("platforms"), cmp: collator.compare, tip: "Sorts loaded rows" },
+      { key: "count", label: "Files", val: fileSort("count"), cmp: numCmp, tip: "Sorts loaded rows" },
+      { key: "size", label: "Size", val: fileSort("size"), cmp: numCmp, tip: "Sorts loaded rows. All files of the newest copy" },
+      { key: "copies", label: "Copies", val: (v) => v.uploads.length, cmp: numCmp, tip: "GitLab projects that hold this version" },
+      { key: "created", label: "Uploaded", val: (v) => secs(v.created), cmp: numCmp },
+      { key: "downloaded", label: "Last download", val: (v) => secs(v.downloaded), cmp: numCmp },
+    ],
+    match: (v, t) => v.version.toLowerCase().includes(t), placeholder: "Filter versions",
+    row: (v) => entry(v).tr, onDraw: (vis) => vis.forEach((v) => lazyWatch(entry(v))),
+    lateKeys: ["requires", "built", "platforms", "count", "size"], onLate: (redraw) => { lazy.redraw = redraw; },
+  });
+  showMain(pypiCrumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("pkg")), `${n.name} `, el("span", { className: "mut", textContent: n.latest })),
+    stats(plural(n.verList.length, "version"), plural(n.uploads.length, "upload"), plural(n.projects.length, "project")),
+    ...tabSet("pkg", [["versions", "Versions", versions], ["projects", `Projects (${n.projects.length})`, () => projectsList(n)]]),
+    pypiCommandsEl({ name: n.name, version: "", project: latestUpload(n.uploads).projectId }, "Use this package"));
+}
+function filesTable(fs) {
+  return el("table", {}, el("tr", {}, ...["File", "Type", "Requires Python", "Built for", "ABI", "Platform", "Size", "SHA-256"].map((h) => el("th", { textContent: h }))),
+    ...fs.map((f) => el("tr", {},
+      el("td", {}, code(f.name), rowCopy(f.name, "Copy file name")), el("td", { className: "mut", textContent: f.kind }),
+      el("td", { className: "nw", textContent: f.requires || "", title: f.requires ? "" : "Not recorded by the uploader" }), el("td", { textContent: f.python }),
+      el("td", {}, code(f.abi)), el("td", { textContent: f.platforms.map((p) => (p.os === "any" ? "any" : `${p.os} ${p.arch}`)).join(", ") }),
+      el("td", { className: "nw", textContent: size(f.size) }), el("td", { className: "nw" }, f.sha256 ? copyValue(f.sha256, "Copy SHA-256", f.sha256.slice(0, 12) + "…") : ""))));
+}
+function uploadSection(u) {
+  const body = el("div", {}, el("p", { className: "mut", textContent: "Loading files..." }));
+  const props = el("table", { className: "props" },
+    tableRow("Project", u.project), tableRow("Uploaded", when(u.created)), tableRow("Last download", when(u.downloaded, "never")),
+    tableRow("Links", el("span", {}, gitlabLink(u.webPath, "Package in GitLab"),
+      ...(u.pipeline ? [" · ", gitlabLink(`/${u.project}/-/pipelines/${u.pipeline.id}`, `Pipeline ${u.pipeline.id}`), u.pipeline.sha ? el("span", { className: "mut", textContent: ` (${u.pipeline.ref} ${u.pipeline.sha.slice(0, 8)})` }) : null] : [el("span", { className: "mut", textContent: " · uploaded outside a pipeline" })]))));
+  filesOf(u).then((fs) => {
+    const s = summary(fs);
+    props.append(tableRow("Files", `${s.count}, ${size(s.size)} in all`), tableRow("Requires Python", s.requires || "not recorded by the uploader"),
+      tableRow("Built for", s.built), tableRow("Platforms", s.platforms));
+    body.replaceChildren(filesTable(fs));
+  }, (e) => body.replaceChildren(el("p", { className: "mut", textContent: e.message })));
+  return el("section", { className: "upload" }, props, body);
+}
+// One row per project that holds the version: filtered and paged like every list, so a thousand copies stay one table.
+function copiesList(n) {
+  const detail = el("div", { className: "copydetail" }), rowsOf = new Map();
+  const show = (u) => {
+    for (const [id, tr] of rowsOf) tr.setAttribute("aria-selected", String(id === u.id));
+    detail.replaceChildren(el("h3", { textContent: u.project }), uploadSection(u));
+  };
+  const rowOf = (u) => {
+    if (!rowsOf.has(u.id)) {
+      rowsOf.set(u.id, el("tr", { className: "pick", tabIndex: 0, "aria-selected": "false", onclick: () => show(u), onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); show(u); } } },
+        el("td", { textContent: u.project }), el("td", { className: "mut" }, when(u.created)), el("td", { className: "mut" }, when(u.downloaded, "never")),
+        el("td", { className: "mut", textContent: u.pipeline ? `pipeline ${u.pipeline.id}` : "outside a pipeline" })));
+    }
+    return rowsOf.get(u.id);
+  };
+  const list = listView({
+    id: "copies:" + n.id, items: n.uploads, tie: (a, b) => collator.compare(a.project, b.project), defaultCmp: (a, b) => (b.created || "").localeCompare(a.created || "") || collator.compare(a.project, b.project),
+    columns: [
+      { key: "project", label: "Project", val: (u) => u.project, cmp: collator.compare },
+      { key: "created", label: "Uploaded", val: (u) => secs(u.created), cmp: numCmp },
+      { key: "downloaded", label: "Last download", val: (u) => secs(u.downloaded), cmp: numCmp },
+      { key: "by", label: "Uploaded by", val: (u) => (u.pipeline ? "pipeline" : "other"), cmp: collator.compare },
+    ],
+    match: (u, t) => u.project.toLowerCase().includes(t), placeholder: "Filter projects", row: rowOf,
+  });
+  show(n.uploads[0]);
+  return [el("h3", { textContent: `Copies (${n.uploads.length})` }), el("p", { className: "mut", textContent: "Select a copy to see its files." }), ...list, detail];
+}
+function verPane(n) {
+  const blocked = pypiNotice(n);
+  if (blocked) return showMain(...blocked);
+  const pkg = n.parent, newer = pkg.verList.filter((x) => verCompare(x.version, n.version) > 0 && !isPre(x.version));
+  showMain(pypiCrumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("tag")), `${pkg.name} ${n.version}`),
+    el("p", { className: "reporef" }, copyValue(`${pkg.name}==${n.version}`, "Copy requirement")),
+    ...(isPre(n.version) ? [el("p", { className: "hint", textContent: "A pre-release: pip installs it only when asked for this version or given --pre." })] : []),
+    ...(newer.length ? [el("p", { className: "mut" }, "Newer: ", ...newer.slice(-3).reverse().flatMap((x, i) => [i ? ", " : "", link(x, x.version)]))] : []),
+    stats(n.uploads.length > 1 ? `${n.uploads.length} copies` : "", "uploaded " + ago(secs(n.created)), n.downloaded ? "downloaded " + ago(secs(n.downloaded)) : "never downloaded"),
+    ...(n.uploads.length > 1 ? [el("p", { className: "hint", textContent: "Several projects hold this version. The group index serves one of them, and their files can differ." })] : []),
+    pypiCommandsEl({ name: pkg.name, version: n.version, project: n.uploads[0].projectId }, "Use this version"),
+    ...(n.uploads.length > 1 ? copiesList(n) : [el("h3", { textContent: "Files" }), uploadSection(n.uploads[0])]));
+}
+
+// ---- PyPI live updates: a named "pypi" event on the same stream, and /api/pypi/seq while the stream is down ----------------
+let pypiSyncing = null;
+async function pypiSync() {
+  if (!cfg.pypi) return;
+  if (pypiSyncing) return pypiSyncing;
+  pypiSyncing = (async () => {
+    try {
+      const snap = await api("/api/pypi/packages");
+      const first = !pypi.loaded;
+      if (!first && snap.seq === pypi.seq && snap.error === pypi.error) return;
+      pypi = { ...snap, denied: false };
+      if (!snap.loaded) { setTimeout(() => void pypiSync(), 2000); renderTree(); return; }
+      const fresh = applyPypi(snap.packages, !first);
+      if (tree.sel && /^[kv]:/.test(tree.sel) && !tree.byId.has(tree.sel)) { location.hash = "#/pypi"; return; } // the package or version is gone
+      renderTree();
+      if (first || fresh.size || /^(proot|[kv]:)/.test(tree.sel || "") || tree.sel === "recent") void renderPane();
+    } catch (e) {
+      pypi.denied = e.status === 401;
+      pypi.error = e.message;
+      renderTree();
+    } finally { pypiSyncing = null; }
+  })();
+  return pypiSyncing;
+}
+
+// The sidebar's type filter: all, containers or python. Shown only when the PyPI source is on.
+function drawTypes() {
+  const box = $("types");
+  box.hidden = !cfg.pypi;
+  if (!cfg.pypi) return;
+  box.replaceChildren(segmented("t-types", [["all", "All"], ["containers", "Containers"], ["python", "Python"]], "show", (c) => applyPrefs(c)));
+}
+
 loadPrefs(); applyTheme();
 setWidth(prefs.sidebar, false);
 for (const id of prefs.expanded) expanded.add(id);
@@ -1689,12 +2179,17 @@ $("prefs").onclick = () => settings();
 $("help").onclick = () => helpPanel();
 tree.root = { kind: "root", id: "root", name: "Registry", parent: null, kids: new Map(), sortedKids: null };
 tree.byId.set("root", tree.root);
+tree.proot = { kind: "proot", id: "proot", name: "PyPI", parent: null, kids: [] };
+tree.byId.set("proot", tree.proot);
 tree.names = [];
 try { cfg = await api("/api/config"); $("reg").textContent = cfg.registry; $("ver").textContent = `v${cfg.version} · ${cfg.revision.slice(0, 7)}`; banner(notice());
   if (cfg.login) $("who").replaceChildren(...(cfg.user ? [cfg.user, " ", el("a", { href: cfg.logout, textContent: "Log out" })] : [el("a", { href: cfg.login, textContent: "Log in", className: "btn" })]));
 }  catch (e) { banner(e.message, true); }
 expanded.add("root");
+expanded.add("proot");
+drawTypes();
 await sync();
+await pypiSync();
 addEventListener("hashchange", () => void navigate());
 startLive();
 startPoll();

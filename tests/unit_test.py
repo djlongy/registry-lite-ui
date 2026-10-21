@@ -10,11 +10,14 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 import poller as P  # noqa: E402
 import registry as R  # noqa: E402
 import server as S  # noqa: E402
+import gitlab as G  # noqa: E402
+import pypi as Y  # noqa: E402
 
 IDX = "application/vnd.oci.image.index.v1+json"
 IMG = "application/vnd.oci.image.manifest.v1+json"
@@ -749,6 +752,133 @@ class Resilience(unittest.TestCase):
         p.last_tick = 0
         p.scan("a", 10)
         self.assertGreater(p.last_tick, 0)
+
+
+TOKEN = "glpat-test-token-value"
+
+
+def upload(i, name, version, project=7, created="2026-10-01T10:00:00.000Z"):
+    return {"id": i, "name": name, "version": version, "package_type": "pypi", "project_id": project, "project_path": f"grp/p{project}",
+            "created_at": created, "last_downloaded_at": None, "_links": {"web_path": f"/grp/p{project}/-/packages/{i}"},
+            "pipeline": {"id": 99, "ref": "main", "sha": "a" * 40}}
+
+
+class FakeGitLab(http.server.BaseHTTPRequestHandler):
+    """Group 5 (grp) with 250 uploads over three pages, files for upload 1, and a PEP 503 page for one project."""
+    packages = [upload(1, "PyYAML", "6.0.2"), upload(2, "pyyaml", "6.0.3"), upload(3, "bad name!", "1"),
+                *[upload(10 + i, f"pkg{i}", "1.0") for i in range(247)]]
+    calls = []
+    public = False  # whether the group index answers without a login
+
+    def log_message(self, *a):
+        pass
+
+    def answer(self, status, body, ctype="application/json", headers=()):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        url = urllib.parse.urlsplit(self.path)
+        q = urllib.parse.parse_qs(url.query)
+        FakeGitLab.calls.append(url.path)
+        basic = self.headers.get("Authorization", "")
+        if url.path == "/api/v4/groups/5/-/packages/pypi/simple" and FakeGitLab.public:
+            return self.answer(200, b"<html></html>", "text/html")
+        if self.headers.get("PRIVATE-TOKEN") != TOKEN and not basic.startswith("Basic "):
+            return self.answer(401, {"message": "401 Unauthorized"})
+        if url.path == "/api/v4/groups/grp":
+            return self.answer(200, {"id": 5, "full_path": "grp"})
+        if url.path == "/api/v4/groups/5/packages":
+            page, per = int(q["page"][0]), int(q["per_page"][0])
+            rows = self.packages[(page - 1) * per: page * per]
+            more = page * per < len(self.packages)
+            return self.answer(200, rows, headers=[("X-Next-Page", str(page + 1) if more else "")])
+        if url.path == "/api/v4/projects/7/packages/1/package_files":
+            return self.answer(200, [{"file_name": "PyYAML-6.0.2-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", "size": 737360,
+                                      "file_sha256": "3b" * 32, "created_at": "2026-10-01T10:00:00.000Z"},
+                                     {"file_name": "PyYAML-6.0.2.tar.gz", "size": 1000, "file_sha256": "zz", "created_at": "x"},
+                                     {"file_name": "../etc/passwd", "size": 1}])
+        if url.path == "/api/v4/projects/7/packages/pypi/simple/pyyaml":
+            return self.answer(200, b'<a href="https://g/api/v4/projects/7/packages/pypi/files/3b/PyYAML-6.0.2-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl#sha256=3b" '
+                                    b'data-requires-python="&gt;=3.8">x</a><a href="files/1/PyYAML-6.0.2.tar.gz#sha256=1">y</a>', "text/html")
+        self.answer(404, {"message": "404 Not Found"})
+
+
+def serve_fake(handler):
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+
+class PypiSource(unittest.TestCase):
+    """The optional PyPI source: off without GITLAB_URL, and behind a login when an auth proxy is in front."""
+    @classmethod
+    def setUpClass(cls):
+        cls.gl = serve_fake(FakeGitLab)
+        cls.env = {"GITLAB_URL": f"http://127.0.0.1:{cls.gl.server_address[1]}", "GITLAB_GROUP": "grp", "GITLAB_TOKEN": TOKEN}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.gl.shutdown()
+
+    def serve(self, env):
+        cfg = S.Config(env)
+        if cfg.pypi:
+            cfg.pypi.poller.cycle()
+        srv = S.BoundedServer(("127.0.0.1", 0), S.make_handler(cfg), 8)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return cfg, srv.server_address[1]
+
+    def get(self, port, path, extra=""):
+        c = socket.create_connection(("127.0.0.1", port), timeout=5)
+        self.addCleanup(c.close)
+        c.sendall(f"GET {path} HTTP/1.0\r\nHost: t\r\n{extra}\r\n".encode())
+        out = b""
+        while chunk := c.recv(65536):
+            out += chunk
+        head, _, body = out.partition(b"\r\n\r\n")
+        return int(head.split(b" ")[1]), body
+
+    def test_off_without_gitlab(self):
+        cfg, port = self.serve({})
+        self.assertIsNone(cfg.pypi)
+        self.assertEqual(self.get(port, "/api/pypi/packages")[0], 404)
+
+    def test_packages_files_and_index_auth(self):
+        cfg, port = self.serve(self.env)
+        status, body = self.get(port, "/api/pypi/packages")
+        self.assertEqual((status, len(json.loads(body)["packages"])), (200, 249))
+        status, body = self.get(port, "/api/pypi/files?id=1&project=999&name=zzz")  # project and name come from the catalog
+        self.assertEqual(json.loads(body)[0]["requires"], ">=3.8")
+        self.assertEqual(self.get(port, "/api/pypi/files?id=424242")[0], 404)  # not an upload of this group
+        self.assertEqual(cfg.pypi.config()["indexAuth"], "token")  # the fake answers 401 without a login
+
+    def test_login_guards_pypi_only(self):
+        _, port = self.serve({**self.env, "UI_LOGIN_URL": "/oauth2/start"})
+        for path in ("/api/pypi/packages", "/api/pypi/files?id=1", "/api/pypi/seq"):
+            self.assertEqual(self.get(port, path)[0], 401, path)
+        self.assertEqual(self.get(port, "/api/pypi/packages", "X-Forwarded-Email: a@example.internal\r\n")[0], 200)
+        _, port = self.serve({**self.env, "UI_LOGIN_URL": "/oauth2/start", "UI_PYPI_PUBLIC": "true"})
+        self.assertEqual(self.get(port, "/api/pypi/packages")[0], 200)
+
+    def test_config_is_checked(self):
+        for change in ({"GITLAB_TOKEN": ""}, {"GITLAB_GROUP": ""}, {"GITLAB_URL": "g.example"}, {"UI_PYPI_PUBLIC_URL": "javascript:x"}, {"UI_PYPI_INDEX_AUTH": "maybe"}):
+            with self.assertRaises(ValueError, msg=change):
+                Y.Source({**self.env, **change})
+
+    def test_wheel_tags(self):
+        d = G.describe("x-1.0-cp312-cp312-manylinux_2_17_x86_64.musllinux_1_1_x86_64.whl")
+        self.assertEqual([(p["os"], p["arch"]) for p in d["platforms"]], [("linux (musl) 1.1+", "x86_64"), ("linux glibc 2.17+", "x86_64")])
+        self.assertEqual(G.describe("numpy-2.1.0-cp312-cp312-win_amd64.whl")["platforms"], [{"os": "windows", "arch": "amd64"}])
 
 
 class Http(unittest.TestCase):

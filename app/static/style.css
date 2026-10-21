@@ -270,3 +270,12 @@ menu { display:flex; gap:var(--s2); justify-content:flex-end; padding:0; margin:
   .seg { margin-left:auto; }
 }
 @media (prefers-reduced-motion: reduce) { .row.flash { animation:none; } }
+
+/* PyPI source */
+#types { padding:0 var(--s2) var(--s2); } #types .seg { width:100%; } #types .seg button { flex:1; }
+.stats { display:flex; flex-wrap:wrap; gap:var(--s2); margin:calc(var(--s2) * -1) 0 var(--s4); }
+.stat { padding:2px var(--s2); border:1px solid var(--line); border-radius:var(--r1); color:var(--mut); font-size:12.5px; }
+.panetabs { flex-wrap:wrap; border-bottom:1px solid var(--line); margin-bottom:var(--s4); }
+.segs { display:flex; gap:var(--s2); flex-wrap:wrap; }
+tr.pick { cursor:pointer; } tr.pick[aria-selected=true] > td { background:var(--acc-soft); }
+.copydetail { margin-top:var(--s4); } .upload > div { margin-top:var(--s4); }
