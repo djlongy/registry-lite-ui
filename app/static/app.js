@@ -439,7 +439,7 @@ let treeQueued = false;
 function scheduleTree() { if (!treeQueued) { treeQueued = true; requestAnimationFrame(() => { treeQueued = false; renderTree(); }); } }
 function rowSig(r) { // what a row looks like, so an unchanged one is reused
   const n = r.n;
-  const own = n ? [isOpen(n), n.kind === "node" && n.repo, n.id === tree.sel, n.id === tree.focus, n.name, expandable(n), n.kind === "tag" && tagKind(n)] : [];
+  const own = n ? [isOpen(n), n.kind === "node" && n.repo, n.id === tree.sel, n.id === tree.focus, rowLabel(n), expandable(n), n.kind === "tag" && tagKind(n)] : [];
   return [r.depth, r.anc.join(""), r.last, r.pos, r.count, ...own].join("|");
 }
 function cachedRow(r, keep) {
@@ -828,7 +828,7 @@ const TAG_COLUMNS = [
   { key: "created", label: "Created", tip: "Sorts loaded rows. When the image was built, from its config. A multi-arch index has none.", val: createdOf, cmp: numCmp },
   { key: "changed", label: "Changed", tip: "When this UI saw the tag change", val: (t) => t.changed || null, cmp: numCmp },
 ];
-const tagDefault = (a, b) => (prefs.sort === "recent" ? (b.changed || 0) - (a.changed || 0) : 0) || tagCompare(a.tag, b.tag);
+const tagDefault = (a, b) => (prefs.sort === "recent" ? (b.changed || 0) - (a.changed || 0) : 0) || tagCompare(b.tag, a.tag); // newest version first, as in the tree
 function sortItems(items, col, dir, tie) {
   const keyed = items.filter((i) => col.val(i) != null);
   const blank = items.filter((i) => col.val(i) == null);
@@ -946,7 +946,7 @@ function tagsList(n) {
     return rowsOf.get(t);
   };
   return listView({
-    id: "tags:" + n.path, items: n.tagList, columns: TAG_COLUMNS, defaultCmp: tagDefault, tie: (a, b) => tagCompare(a.tag, b.tag),
+    id: "tags:" + n.path, items: n.tagList, columns: TAG_COLUMNS, defaultCmp: tagDefault, tie: (a, b) => tagCompare(b.tag, a.tag),
     match: (t, text) => t.tag.toLowerCase().includes(text), placeholder: "Filter tags",
     row: (t) => entry(t).tr, onDraw: (vis) => vis.forEach((t) => lazyWatch(entry(t))),
     lateKeys: ["size", "platforms", "created"], onLate: (redraw) => { lazy.redraw = redraw; },
