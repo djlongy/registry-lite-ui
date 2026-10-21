@@ -80,12 +80,12 @@ A repository browser in the style of Artifactory: a tree on the left, details on
 
 | | |
 |---|---|
-| Reference | `ghcr.io/djlongy/registry-lite-ui`, tagged `latest` (main), the commit sha, and `X.Y.Z` and `X.Y` for a release. The header shows the version and the short commit sha |
+| Reference | `ghcr.io/djlongy/registry-lite-ui`. A release is tagged `X.Y.Z`, `X.Y`, `X` and `latest`; main is tagged `edge`; every build has its commit sha. The header shows the version and the short commit sha |
 | Base | `registry.access.redhat.com/ubi9/python-312-minimal`, pinned by digest, no pip installs |
 | Platforms | `linux/amd64`, `linux/arm64` |
 | Runtime user | uid and gid 65534, read-only root filesystem, `/state` owned by 65534. `compose.yml` runs the registry as 65534:65534 too, see [Shared ownership](#shared-ownership) |
 
-`docker compose up -d` and `podman-compose up -d` pull the prebuilt image. `latest` follows main, so set `UI_IMAGE` in your own `.env` to a version (`ghcr.io/djlongy/registry-lite-ui:0.1.0`) or a digest. To build it yourself:
+`docker compose up -d` and `podman-compose up -d` pull the prebuilt image. Set `UI_IMAGE` in your own `.env` to a version (`ghcr.io/djlongy/registry-lite-ui:0.2.1`) or a digest. Renovate's docker datasource finds new `X.Y.Z` tags and opens the update. To build it yourself:
 
 ```sh
 podman build --format docker --build-arg APP_VERSION="$(cat VERSION)" --build-arg APP_REVISION="$(git rev-parse HEAD)" -f Containerfile -t registry-lite-ui .   # or: docker compose up -d --build
@@ -95,7 +95,7 @@ podman build --format docker --build-arg APP_VERSION="$(cat VERSION)" --build-ar
 
 ## Releases
 
-The version is the `VERSION` file, valid semver, and nothing else. To release, change it to `X.Y.Z` and merge to main. The `build` workflow then publishes `X.Y.Z` and `X.Y`, tags `vX.Y.Z` on that commit and creates the GitHub Release from `RELEASE_NOTES.md` with the image digests. A prerelease suffix (`0.2.0-dev`) or an existing tag skips the release, and main keeps publishing `latest` and the commit sha.
+The version is the `VERSION` file, valid semver. Merging to main publishes `edge` and the commit sha, never a release. To release a tested main, push a tag that matches `VERSION`: `git tag -a v0.2.1 -m "registry-lite-ui 0.2.1" && git push origin v0.2.1`. The `build` workflow then builds that commit, tests the pushed image, publishes `X.Y.Z`, `X.Y`, `X` and `latest`, and creates the GitHub Release from `RELEASE_NOTES.md` with the image digests. A tag that is not `vX.Y.Z` or does not match `VERSION` fails before anything is built.
 
 ## UI only
 

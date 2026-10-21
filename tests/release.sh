@@ -10,9 +10,11 @@ ok() { local name=$1; shift; if "$@" >/dev/null 2>&1; then echo "PASS $name"; el
 ok "VERSION file is valid semver" $r check "$(cat VERSION)"
 for v in 0.1.0 1.2.3 0.1.0-dev 1.0.0-rc.1 1.0.0+build.5; do ok "semver accepts $v" $r check $v; done
 for v in "" 1.0 v1.0.0 01.0.0 1.0.0- dev; do bad "semver rejects '$v'" $r check "$v"; done
-want "0.1.0-dev does not release" release=false $r decide 0.1.0-dev false
-want "0.1.0 with no tag releases" release=true $r decide 0.1.0 false
-want "0.1.0 with a tag is skipped" release=false $r decide 0.1.0 true
-want "1.0.0-rc.1 does not release" release=false $r decide 1.0.0-rc.1 false
+want "a push to main does not release" release=false $r decide refs/heads/main 0.2.1
+want "a pull request does not release" release=false $r decide refs/pull/7/merge 0.2.1
+want "tag v0.2.1 with VERSION 0.2.1 releases" release=true $r decide refs/tags/v0.2.1 0.2.1
+bad "tag v0.2.2 with VERSION 0.2.1 fails" $r decide refs/tags/v0.2.2 0.2.1
+bad "tag v0.3.0-rc.1 fails" $r decide refs/tags/v0.3.0-rc.1 0.3.0-rc.1
+bad "tag v1.0 fails" $r decide refs/tags/v1.0 1.0
 echo "failures: $fails"
 exit $((fails > 0))

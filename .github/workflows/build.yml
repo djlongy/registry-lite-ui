@@ -2,12 +2,13 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ["v*"]  # a release is a pushed tag vX.Y.Z that matches VERSION
   pull_request:
 permissions:
   contents: read
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}  # a release run on main is never cancelled
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # a run on main or a tag is never cancelled
 env:
   IMAGE: ghcr.io/djlongy/registry-lite-ui
 jobs:
@@ -21,6 +22,7 @@ jobs:
         run: |
           .github/scripts/release.sh check "$(cat VERSION)"
           tests/release.sh
+          .github/scripts/release.sh decide "$GITHUB_REF" "$(cat VERSION)"  # a tag that does not match VERSION fails here, before any build
       - name: Simulate a checkout made under umask 077
         run: chmod -R go-rwx app
       - name: Build amd64 and arm64 with buildah
@@ -67,7 +69,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # contents: write creates the release tag and the GitHub Release, packages: write pushes the image
+    # contents: write creates the GitHub Release for a tag, packages: write pushes the image
     permissions:
       contents: write
       packages: write
@@ -80,10 +82,8 @@ jobs:
         id: decide
         run: |
           version=$(cat VERSION)
-          exists=false
-          git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1 && exists=true
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          .github/scripts/release.sh decide "$version" "$exists" | tee -a "$GITHUB_OUTPUT"
+          .github/scripts/release.sh decide "$GITHUB_REF" "$version" | tee -a "$GITHUB_OUTPUT"
       - name: Push the manifest list to ghcr.io
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -119,13 +119,13 @@ jobs:
           RELEASE: ${{ steps.decide.outputs.release }}
           VERSION: ${{ steps.decide.outputs.version }}
         run: |
-          # latest moves with main only; a release adds X.Y.Z and X.Y. Same manifest list, same digest.
+          # main moves edge. A release tag publishes X.Y.Z (what Renovate pins), X.Y, X and latest. Same manifest list, same digest.
           tags=()
-          [ "$GITHUB_REF" = refs/heads/main ] && tags+=(latest)
-          if [ "$RELEASE" = true ]; then tags+=("$VERSION" "${VERSION%.*}"); fi
+          [ "$GITHUB_REF" = refs/heads/main ] && tags+=(edge)
+          if [ "$RELEASE" = true ]; then tags+=("$VERSION" "${VERSION%.*}" "${VERSION%%.*}" latest); fi
           for t in "${tags[@]}"; do skopeo copy --all --preserve-digests "docker://$IMAGE:$GITHUB_SHA" "docker://$IMAGE:$t"; done
           for t in "${tags[@]}"; do test "$(skopeo inspect --raw "docker://$IMAGE:$t" | sha256sum)" = "$(skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA" | sha256sum)"; done
-      - name: Tag the release and create the GitHub Release
+      - name: Create the GitHub Release for the tag
         if: steps.decide.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -134,10 +134,8 @@ jobs:
           raw=$(skopeo inspect --raw "docker://$IMAGE:$GITHUB_SHA")
           {
             cat RELEASE_NOTES.md
-            printf '\n## Image\n\n`%s:%s` (also `%s`), linux/amd64 and linux/arm64, uid 65534.\n\n' "$IMAGE" "$VERSION" "${VERSION%.*}"
+            printf '\n## Image\n\n`%s:%s` (also `%s`, `%s` and `latest`), linux/amd64 and linux/arm64, uid 65534.\n\n' "$IMAGE" "$VERSION" "${VERSION%.*}" "${VERSION%%.*}"
             printf 'Manifest list: `%s@sha256:%s`\n\n' "$IMAGE" "$(printf %s "$raw" | sha256sum | cut -d' ' -f1)"
             printf %s "$raw" | jq -r '.manifests[] | "- \(.platform.os)/\(.platform.architecture): `\(.digest)`"'
           } > notes.md
-          git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com tag -a "v$VERSION" -m "registry-lite-ui $VERSION" "$GITHUB_SHA"
-          git push origin "refs/tags/v$VERSION"
           gh release create "v$VERSION" --verify-tag --title "registry-lite-ui $VERSION" --notes-file notes.md
