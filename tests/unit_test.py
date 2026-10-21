@@ -790,7 +790,7 @@ class FakeGitLab(http.server.BaseHTTPRequestHandler):
         basic = self.headers.get("Authorization", "")
         if url.path == "/api/v4/groups/5/-/packages/pypi/simple" and FakeGitLab.public:
             return self.answer(200, b"<html></html>", "text/html")
-        if self.headers.get("PRIVATE-TOKEN") != TOKEN and not basic.startswith("Basic "):
+        if self.headers.get("PRIVATE-TOKEN") != TOKEN and not basic.startswith("Basic ") and not FakeGitLab.public:
             return self.answer(401, {"message": "401 Unauthorized"})
         if url.path == "/api/v4/groups/grp":
             return self.answer(200, {"id": 5, "full_path": "grp"})
@@ -852,6 +852,21 @@ class PypiSource(unittest.TestCase):
         cfg, port = self.serve({})
         self.assertIsNone(cfg.pypi)
         self.assertEqual(self.get(port, "/api/pypi/packages")[0], 404)
+        _, port = self.serve({"UI_LOGIN_URL": "/oauth2/start"})  # behind a proxy, still no PyPI: 404, not a crash
+        self.assertEqual(self.get(port, "/api/pypi/packages")[0], 404)
+
+    def test_locked_config_names_no_group(self):
+        cfg = S.Config({**self.env, "UI_LOGIN_URL": "/oauth2/start"})
+        cfg.client.delete_enabled = lambda: True  # /api/config asks the registry, and there is none here
+        cfg.pypi.poller.cycle()
+        srv = S.BoundedServer(("127.0.0.1", 0), S.make_handler(cfg), 8)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        port = srv.server_address[1]
+        self.assertEqual(json.loads(self.get(port, "/api/config")[1])["pypi"], {"locked": True})  # no host, no group
+        opened = json.loads(self.get(port, "/api/config", "X-Forwarded-Email: a@example.internal\r\n")[1])["pypi"]
+        self.assertEqual((opened["groupRef"], opened["indexAuth"]), ("grp", "token"))
 
     def test_packages_files_and_index_auth(self):
         cfg, port = self.serve(self.env)
@@ -870,8 +885,21 @@ class PypiSource(unittest.TestCase):
         _, port = self.serve({**self.env, "UI_LOGIN_URL": "/oauth2/start", "UI_PYPI_PUBLIC": "true"})
         self.assertEqual(self.get(port, "/api/pypi/packages")[0], 200)
 
+    def test_public_group_needs_no_token(self):
+        FakeGitLab.public = True
+        self.addCleanup(setattr, FakeGitLab, "public", False)
+        cfg, port = self.serve({**self.env, "GITLAB_TOKEN": ""})
+        status, body = self.get(port, "/api/pypi/packages")
+        self.assertEqual((status, len(json.loads(body)["packages"])), (200, 249))
+        self.assertEqual(cfg.pypi.config()["indexAuth"], "none")
+        FakeGitLab.public = False
+        with self.assertRaises(G.GitLabError) as e:  # the group turned private: no token, so reads fail (the poller logs it)
+            cfg.pypi.poller.cycle()
+        self.assertIn("token", e.exception.message)
+        self.assertEqual(len(cfg.pypi.catalog.snapshot()["packages"]), 249)  # the last list stays
+
     def test_config_is_checked(self):
-        for change in ({"GITLAB_TOKEN": ""}, {"GITLAB_GROUP": ""}, {"GITLAB_URL": "g.example"}, {"UI_PYPI_PUBLIC_URL": "javascript:x"}, {"UI_PYPI_INDEX_AUTH": "maybe"}):
+        for change in ({"GITLAB_GROUP": ""}, {"GITLAB_URL": "g.example"}, {"UI_PYPI_PUBLIC_URL": "javascript:x"}, {"UI_PYPI_INDEX_AUTH": "maybe"}):
             with self.assertRaises(ValueError, msg=change):
                 Y.Source({**self.env, **change})
 

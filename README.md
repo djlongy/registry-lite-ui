@@ -135,14 +135,14 @@ WantedBy=multi-user.target
 `compose.pypi.yml` adds one GitLab group's PyPI packages beside the registry, read from GitLab's package registry API. Without it the UI is containers only, exactly as before.
 
 ```sh
-install -m 600 /dev/stdin secrets/gitlab_token   # a token with read_api on the group; then chown it to uid 65534 (see Shared ownership)
+install -m 600 /dev/stdin secrets/gitlab_token   # a token with read_api on the group, or an empty file for a public group; chown it to uid 65534 (see Shared ownership)
 GITLAB_URL=https://gitlab.example.internal GITLAB_GROUP=team/python docker compose -f compose.yml -f compose.pypi.yml up -d
 ```
 
 | Req | Name | Default | Purpose |
 |---|---|---|---|
 | Required | `GITLAB_URL`, `GITLAB_GROUP` | none | The GitLab the UI reads, and the group path or id. Subgroups are included. |
-| Required | `secrets/gitlab_token` | none | One line, a token with `read_api` on the group. Read at start, never sent to the browser. |
+| Required | `secrets/gitlab_token` | none | One line, a token with `read_api` on the group, read at start and never sent to the browser. For a public group leave the file empty: the UI then reads anonymously. |
 | Optional | `UI_PYPI_PUBLIC_URL` | `GITLAB_URL` | The GitLab address pip users type, when it differs. |
 | Optional | `UI_PYPI_INDEX_AUTH` | `auto` | `auto` leaves `__token__:<TOKEN>` and the `.netrc` step out of install commands while GitLab serves the group index without a login, checked every poll. `token` and `none` force either form. |
 | Optional | `UI_PYPI_PUBLIC` | `false` | Behind `compose.oidc.yml`, PyPI data needs a login unless this is `true`. Container data stays readable either way. |
@@ -154,6 +154,7 @@ GITLAB_URL=https://gitlab.example.internal GITLAB_GROUP=team/python docker compo
 - A version held by several projects lists each copy in one table. Each copy shows its files with SHA-256, Requires-Python (flagged when an uploader left it out) and the Python, ABI and platform read from the wheel name.
 - Install, configure and upload commands come for pip or uv, on Linux/macOS (shell) or Windows (PowerShell). They never contain a token.
 - `/api/pypi/files` answers only for uploads of the configured group, so the token reads nothing else through the UI.
+- Without an auth override, anyone who reaches the UI sees every package the token can read. With an empty token that is exactly what GitLab shows anonymously.
 
 ## Components
 

@@ -115,9 +115,7 @@ class Source:
     """Everything the server needs for the PyPI source, built from the environment. None of it exists when GITLAB_URL is unset."""
     def __init__(self, env):
         token_file = env.get("GITLAB_TOKEN_FILE")
-        token = open(token_file).read().strip() if token_file else env.get("GITLAB_TOKEN", "")
-        if not token:
-            raise ValueError("set GITLAB_TOKEN_FILE (or GITLAB_TOKEN) to a token with read_api on the group")
+        token = open(token_file).read().strip() if token_file else env.get("GITLAB_TOKEN", "")  # empty: anonymous, for a public group
         self.client = G.Client(env["GITLAB_URL"], token, env.get("GITLAB_CA_FILE") or None)
         self.group_ref = env.get("GITLAB_GROUP", "").strip()
         if not self.group_ref:

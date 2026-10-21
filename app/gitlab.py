@@ -40,7 +40,12 @@ class Client:
 
     def open(self, path, basic=False):
         """GET one API path. The PyPI simple index takes basic auth (__token__), the REST API the PRIVATE-TOKEN header."""
-        headers = {"Authorization": "Basic " + base64.b64encode(f"__token__:{self.token}".encode()).decode()} if basic else {"PRIVATE-TOKEN": self.token}
+        if not self.token:  # a public group: GitLab answers anonymous reads
+            headers = {}
+        elif basic:
+            headers = {"Authorization": "Basic " + base64.b64encode(f"__token__:{self.token}".encode()).decode()}
+        else:
+            headers = {"PRIVATE-TOKEN": self.token}
         req = urllib.request.Request(self.api + path, headers={**headers, "Accept": "application/json, text/html"})
         try:
             r = urllib.request.urlopen(req, timeout=self.timeout, context=self.ctx)

@@ -5,6 +5,7 @@
 #   UI_PYPI_INDEX_AUTH   auto (default) leaves __token__:<TOKEN> out of install commands while GitLab serves the index anonymously
 #   UI_PYPI_PUBLIC       true lets anyone see the packages behind compose.oidc.yml; unset, they need a login there
 # The token goes in ./secrets/gitlab_token: one line, a token with read_api on the group, readable by uid 65534 (see README).
+# For a public group the file may be empty: the UI then reads GitLab anonymously.
 services:
   registry-lite-ui:
     environment:

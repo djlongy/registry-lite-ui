@@ -344,13 +344,14 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.log_request(200)
             seq = self.cfg.state.seq
-            pseq = self.cfg.pypi.catalog.seq if self.cfg.pypi else 0
+            watch_pypi = bool(self.cfg.pypi) and not self.pypi_locked()  # a locked user is not told when uploads happen
+            pseq = self.cfg.pypi.catalog.seq if watch_pypi else 0
             self.wfile.write(b"retry: 5000\n\n")
             self.wfile.flush()
             idle = 0
             while not self.hung_up():
                 now = self.cfg.state.wait(seq, 1)
-                if self.cfg.pypi and self.cfg.pypi.catalog.seq != pseq:  # a named event, so the browser reloads only the PyPI list
+                if watch_pypi and self.cfg.pypi.catalog.seq != pseq:  # a named event, so the browser reloads only the PyPI list
                     pseq = self.cfg.pypi.catalog.seq
                     self.wfile.write(b"event: pypi\ndata: %d\n\n" % pseq)
                     self.wfile.flush()
@@ -393,6 +394,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": "CSRF check failed"})
         self.reply(200, handler(self.read_json()))
 
+    def pypi_locked(self):
+        """PyPI data needs a login: an auth proxy is in front, the packages are not public, and this request has no user."""
+        return bool(self.cfg.pypi and self.cfg.login_url and not self.cfg.pypi.public and not user_of(self.headers))
+
     def health(self):  # never calls the registry
         healthy = (self.cfg.poller is None or self.cfg.poller.healthy()) and (self.cfg.pypi is None or self.cfg.pypi.poller.healthy())
         self.send(200 if healthy else 503, b"ok" if healthy else b"poller stalled", "text/plain")
@@ -412,8 +417,11 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/events":
             return self.events()
         if url.path == "/api/config":  # who is logged in comes from this request's headers
-            return self.reply(200, {**self.get[url.path]({}), "user": user_of(self.headers)})
-        if url.path.startswith("/api/pypi/") and self.cfg.login_url and not self.cfg.pypi.public and not user_of(self.headers):
+            out = {**self.get[url.path]({}), "user": user_of(self.headers)}
+            if self.pypi_locked():
+                out["pypi"] = {"locked": True}  # not the GitLab host or the group, which the login guards
+            return self.reply(200, out)
+        if url.path.startswith("/api/pypi/") and self.pypi_locked():
             return self.reply(401, {"error": "log in to see Python packages"})  # the proxy strips a forged user header
         if url.path in self.get:
             return self.reply(200, self.get[url.path](urllib.parse.parse_qs(url.query)))

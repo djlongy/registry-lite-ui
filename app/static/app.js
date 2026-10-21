@@ -254,9 +254,8 @@ const folderLike = (n) => n.kind === "root" || (n.kind === "node" && !n.repo && 
 // A repository that matches only through its tags opens by itself while filtering, as long as few do: each one costs a tags call.
 const AUTO_OPEN_MAX = 10;
 const tagOnly = (n) => n.kind === "node" && n.repo && tree.tm.has(n.path) && !tree.pathHit.has(n.path);
-const autoOpen = (n) => !!tree.filter && (folderLike(n) || (tagOnly(n) && tree.tm.size <= AUTO_OPEN_MAX));
+const autoOpen = (n) => !!tree.filter && (folderLike(n) || (tagOnly(n) && tree.tm.size <= AUTO_OPEN_MAX) || (n.kind === "pkg" && verHit(n, tree.filter.toLowerCase())));
 function isOpen(n) {
-  if (n.kind === "pkg" && tree.filter && verHit(n, tree.filter.toLowerCase())) return !tree.closed.has(n.id); // a version matched
   if (autoOpen(n)) return !tree.closed.has(n.id);
   return expanded.has(n.id);
 }
@@ -389,7 +388,7 @@ function visible() {
     if (n.kind === "node" && n.repo && (n.loading || n.err)) rows.push({ info: n.err || "Loading...", depth: depth + 1, anc: down, last: true });
     if (n.kind === "tag" && n.plats === null) rows.push({ info: "Loading...", depth: depth + 1, anc: down, last: true });
   };
-  if (showsType("containers")) walk(tree.root, 0, [], 1, 1, true);
+  if (showsType("containers")) walk(tree.root, 0, [], 2, topCount(), true);
   pypiRows();
   if (filtering && tree.truncated) rows.push({ info: "Tag search covers only the first 5000 tags.", depth: 0, anc: [], last: true });
 }
@@ -428,8 +427,9 @@ function rowEl(r) {
   if (t && Date.now() - t < 4000) { row.classList.add("flash"); row.style.animationDelay = `-${(Date.now() - t) / 1000}s`; }
   return row;
 }
+const topCount = () => 1 + (showsType("containers") ? 1 : 0) + (cfg.pypi && showsType("python") ? 1 : 0); // Recent plus each root shown
 function recentEl() {
-  const row = el("div", { className: "row", role: "treeitem", id: "ti-recent", tabIndex: tree.focus === "recent" ? 0 : -1, "aria-level": 1, "aria-posinset": 1, "aria-setsize": 2, "aria-selected": String(tree.sel === "recent") },
+  const row = el("div", { className: "row", role: "treeitem", id: "ti-recent", tabIndex: tree.focus === "recent" ? 0 : -1, "aria-level": 1, "aria-posinset": 1, "aria-setsize": topCount(), "aria-selected": String(tree.sel === "recent") },
     el("span", { className: "chev" }), icon("clock"), el("span", { className: "lbl", textContent: "Recent" }));
   row.dataset.id = "recent";
   return row;
@@ -991,13 +991,16 @@ function recentPane() {
     }
   }
   items.sort((x, y) => y.t - x.t);
+  const page = shown || prefs.pageSize; // rows are built for the page shown only: a group can hold 20000 uploads
   const parts = [];
   if (showsType("containers")) parts.push((recent.persistent ? "Container history is saved to disk." : "Container history is in memory only and resets when the UI restarts.")
     + ` Watching since ${new Date(recent.since * 1000).toLocaleString()}; times are when the UI saw the change.`);
   if (cfg.pypi && showsType("python")) parts.push(pypi.denied ? "Log in to see Python uploads." : "Python upload times come from GitLab.");
   const empty = recent.baselined ? "No changes seen yet." : "Reading the registry for the first time.";
   showMain(el("h2", { textContent: "Recent changes" }), el("p", { className: "mut", textContent: parts.join(" ") }),
-    ...(items.length ? paged(items.map((i) => i.el()), ["When", "Change", "Item", "Detail"]) : [el("p", { className: "mut", textContent: empty })]));
+    ...(items.length ? [el("table", {}, el("tr", {}, ...["When", "Change", "Item", "Detail"].map((h) => el("th", { textContent: h }))), ...items.slice(0, page).map((i) => i.el())),
+      ...(items.length > page ? [el("p", {}, el("button", { textContent: `Show more (${items.length - page} left)`, onclick: () => { shown = page + prefs.pageSize; void renderPane(); } }))] : [])]
+      : [el("p", { className: "mut", textContent: empty })]));
 }
 function rootPane(n) {
   const repos = tree.names.filter((p) => !isHidden(tree.byPath.get(p))).length, hidden = tree.names.length - repos;
@@ -1166,7 +1169,9 @@ async function resolve(r) {
   if (r.kind === "root") return tree.root;
   if (r.kind === "proot") return cfg.pypi ? tree.proot : null;
   if (r.kind === "pypi") {
+    if (!cfg.pypi) return null;
     if (!pypi.loaded) await pypiSync();
+    if (pypi.denied || !pypi.loaded) return tree.proot; // the root shows the login or error notice
     const p = tree.byKey.get(r.key);
     return p && r.version ? p.versions.get(r.version) : p;
   }
@@ -1739,7 +1744,7 @@ const when = (iso, never = "") => (iso ? el("span", { title: new Date(iso).toLoc
 const uniq = (xs) => [...new Set(xs.filter(Boolean))];
 const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const shortProject = (p) => p.split("/").pop();
-const showsType = (t) => prefs.show === "all" || prefs.show === t; // the sidebar's type filter: all, containers or python
+const showsType = (t) => !cfg.pypi || prefs.show === "all" || prefs.show === t; // the sidebar's type filter; without PyPI there is nothing to filter
 
 // Versions in PEP 440 order: 1.0.dev1 < 1.0a1 < 1.0b2 < 1.0rc1 < 1.0 < 1.0.post1, numeric parts compared as numbers.
 const PEP440 = /^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:[-_.]?(a|alpha|b|beta|c|rc|pre|preview)[-_.]?(\d*))?(?:-(\d+)|[-_.]?(?:post|rev|r)[-_.]?(\d*))?(?:[-_.]?dev[-_.]?(\d*))?(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?$/i;
@@ -1813,7 +1818,7 @@ function applyPypi(list, flashNew) {
   if (flashNew) for (const id of fresh) flash(tree.byId.get(id));
   return fresh;
 }
-const pypiLabel = () => "PyPI · " + (pypi.group ? pypi.group.path : cfg.pypi?.groupRef || "");
+const pypiLabel = () => "PyPI" + (pypi.group ? " · " + pypi.group.path : cfg.pypi?.groupRef ? " · " + cfg.pypi.groupRef : "");
 const pkgSort = (list) => [...list].sort(prefs.sort === "recent" ? (a, b) => (b.created || "").localeCompare(a.created || "") || byName(a, b) : byName);
 const pkgHit = (n, term) => n.key.includes(term) || n.name.toLowerCase().includes(term);
 const verHit = (n, term) => !pkgHit(n, term) && n.verList.some((v) => v.version.toLowerCase().includes(term));
@@ -1821,7 +1826,7 @@ const verHit = (n, term) => !pkgHit(n, term) && n.verList.some((v) => v.version.
 function pypiRows() {
   if (!cfg.pypi || !showsType("python")) return;
   const term = tree.filter.toLowerCase(), root = tree.proot;
-  rows.push({ n: root, depth: 0, anc: [], pos: 1, count: 1, last: true });
+  rows.push({ n: root, depth: 0, anc: [], pos: topCount(), count: topCount(), last: true });
   if (!isOpen(root)) return;
   if (pypi.denied) { rows.push({ info: "Log in to see Python packages", depth: 1, anc: [], last: true }); return; }
   if (!pypi.loaded) { rows.push({ info: pypi.error || "Loading...", depth: 1, anc: [], last: true }); return; }
