@@ -4,10 +4,11 @@ registry-lite-ui is a web UI for a plain `registry:2` that browses, copies, move
 
 `podman-compose up -d` with `compose.yml` (registry and UI), or `podman-compose -f compose.ui.yml up -d` with `REGISTRY_URL` set for a registry that already runs. `docker compose` works the same way. Pin `UI_IMAGE` to a version or a digest in your `.env`.
 
-## Changes in 0.2.1 (not released yet)
+## Changes in 0.2.1
 
 - `PYPI_INDEX_URL` names the PyPI source with the index URL pip is given, and it can be a project's index as well as a group's. `GITLAB_URL` with `GITLAB_GROUP` still works and is deprecated.
 - Container tags in the tree are listed newest version first, as PyPI versions are.
+- Releases come from a pushed tag `vX.Y.Z`. `latest` now means the latest release, main is `edge`, and each release also gets `X.Y` and `X`.
 
 ## Changes in 0.2.0
 
