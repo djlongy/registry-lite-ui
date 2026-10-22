@@ -10,7 +10,7 @@ USER 0
 # files must be readable by uid 65534 whatever umask the build host checked them out with
 RUN chmod -R a=rX /app && mkdir /state && chown 65534:65534 /state
 USER 65534:65534
-LABEL org.opencontainers.image.source=https://github.com/djlongy/registry-lite-ui \
+LABEL org.opencontainers.image.source=https://github.com/newen-systems/registry-lite-ui \
       org.opencontainers.image.version=${APP_VERSION} \
       org.opencontainers.image.revision=${APP_REVISION}
 EXPOSE 8080

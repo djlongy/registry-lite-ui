@@ -8,7 +8,7 @@
 # Give the directories to the UI uid, which the registry in compose.yml shares: chown -R 65534:65534 /data/certs /data/keys
 services:
   registry-lite-ui:
-    image: ${UI_IMAGE:-ghcr.io/djlongy/registry-lite-ui:latest}
+    image: ${UI_IMAGE:-ghcr.io/newen-systems/registry-lite-ui:latest}
     ports: ["${UI_BIND:-127.0.0.1}:${UI_PORT:-8080}:8080"]
     environment:
       REGISTRY_URL: ${REGISTRY_URL:?set REGISTRY_URL}

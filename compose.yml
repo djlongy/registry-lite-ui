@@ -28,7 +28,7 @@ services:
 
   registry-lite-ui:
     # `up -d` pulls this image, `up -d --build` builds Containerfile and tags it with the same name.
-    image: ${UI_IMAGE:-ghcr.io/djlongy/registry-lite-ui:latest}
+    image: ${UI_IMAGE:-ghcr.io/newen-systems/registry-lite-ui:latest}
     build:
       context: .
       dockerfile: Containerfile
