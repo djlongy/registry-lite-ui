@@ -10,7 +10,7 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # a run on main or a tag is never cancelled
 env:
-  IMAGE: ghcr.io/djlongy/registry-lite-ui
+  IMAGE: ghcr.io/newen-systems/registry-lite-ui
 jobs:
   build:
     runs-on: ubuntu-24.04

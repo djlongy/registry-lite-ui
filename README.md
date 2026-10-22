@@ -42,7 +42,7 @@ Set on the `registry-lite-ui` service. The full set is `Config` in `app/server.p
 `.env`:
 
 ```sh
-UI_IMAGE=ghcr.io/djlongy/registry-lite-ui:0.2.1
+UI_IMAGE=ghcr.io/newen-systems/registry-lite-ui:0.2.1
 UI_REGISTRY_HOST=registry.example.internal:5000
 ```
 
@@ -56,7 +56,7 @@ docker compose up -d   # registry on :5000 as before, UI on http://localhost:808
 
 | | |
 |---|---|
-| Reference | `ghcr.io/djlongy/registry-lite-ui` |
+| Reference | `ghcr.io/newen-systems/registry-lite-ui` |
 | Base | `registry.access.redhat.com/ubi9/python-312-minimal`, pinned by digest in `Containerfile`, stdlib only |
 | Platforms | linux/amd64, linux/arm64 |
 | User | uid and gid 65534, read-only root filesystem, no capabilities |

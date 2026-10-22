@@ -6,6 +6,7 @@ registry-lite-ui is a web UI for a plain `registry:2` that browses, copies, move
 
 ## Changes in 0.2.1
 
+- The image is `ghcr.io/newen-systems/registry-lite-ui`. Images up to 0.2.0 stay at `ghcr.io/djlongy/registry-lite-ui`.
 - `PYPI_INDEX_URL` names the PyPI source with the index URL pip is given, and it can be a project's index as well as a group's. `GITLAB_URL` with `GITLAB_GROUP` still works and is deprecated.
 - Container tags in the tree are listed newest version first, as PyPI versions are.
 - Releases come from a pushed tag `vX.Y.Z`. `latest` now means the latest release, main is `edge`, and each release also gets `X.Y` and `X`.

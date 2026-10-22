@@ -56,7 +56,7 @@ UI_SCHEME=https UI_CURL_ARGS="--cacert $WORK/tls.crt" tests/e2e.sh ui
 
 echo "-- UI refuses an untrusted or mismatched registry certificate"
 net=${COMPOSE_PROJECT_NAME}_default
-run() { docker run -d --rm --name tls-probe --network "$net" -p 8089:8080 "$@" "${UI_IMAGE:-ghcr.io/djlongy/registry-lite-ui:latest}" >/dev/null; for _ in $(seq 15); do curl -fs localhost:8089/healthz >/dev/null && break; sleep 1; done; curl -s localhost:8089/api/repos; docker rm -f tls-probe >/dev/null; }
+run() { docker run -d --rm --name tls-probe --network "$net" -p 8089:8080 "$@" "${UI_IMAGE:-ghcr.io/newen-systems/registry-lite-ui:latest}" >/dev/null; for _ in $(seq 15); do curl -fs localhost:8089/healthz >/dev/null && break; sleep 1; done; curl -s localhost:8089/api/repos; docker rm -f tls-probe >/dev/null; }
 out=$(run -e REGISTRY_URL=https://$H:5000); echo "no CA: $out"; [[ $out == *"TLS verification failed"* ]] && ok "no CA: verify failure with a clear message" || bad "no CA"
 cp "$WORK/tls.crt" "$WORK/ca-only.crt"
 out=$(run -e REGISTRY_URL=https://registry:5000 -e REGISTRY_CA_FILE=/certs/tls.crt -v "$WORK/tls.crt:/certs/tls.crt:ro"); echo "name not in SAN: $out"
