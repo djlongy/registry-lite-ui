@@ -1238,7 +1238,8 @@ function refreshTouched(touched, gap) { // reload the tags of every changed repo
   for (const n of tree.byPath.values()) {
     if (!n.repo || !(gap || touched.has(n.path))) continue;
     dropManifests(n.path);
-    if (n.tagList.length || n.loading) jobs.push(ensureTags(Object.assign(n, { fresh: false }), true)); // reconciling flashes what changed
+    // reconciling flashes what changed. A repository that answered an error (no tags yet, during a push) loads again too.
+    if (n.tagList.length || n.loading || n.err) jobs.push(ensureTags(Object.assign(n, { fresh: false }), true));
     else flash(n);
   }
   return Promise.all(jobs);
@@ -1693,6 +1694,7 @@ function applyPrefs(change) { // save a change and do what it needs, at once
   if (prefs.live !== before.live) startLive();
   if (prefs.interval !== before.interval) startPoll();
   if (prefs.showEmpty !== before.showEmpty || prefs.show !== before.show) { resetHidden(); renderTree(); drawTypes(); }
+  if (prefs.sort !== before.sort) renderTree(); // the PyPI packages in the tree follow the sort too
   if (prefs.runtime !== before.runtime || prefs.tool !== before.tool || prefs.os !== before.os || prefs.show !== before.show || prefs.sort !== before.sort || prefs.pageSize !== before.pageSize || prefs.showEmpty !== before.showEmpty) { resetShown(); void renderPane(true); }
 }
 function settings() {

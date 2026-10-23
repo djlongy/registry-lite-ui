@@ -67,6 +67,11 @@ jobs:
   publish:
     if: github.event_name == 'push'
     needs: build
+    # A release tag on the head of main starts two runs for one commit. Both push the sha tag, so one at a time, or one
+    # overwrites the other's image while the other checks its tags against it.
+    concurrency:
+      group: publish-${{ github.sha }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # contents: write creates the GitHub Release for a tag, packages: write pushes the image

@@ -29,6 +29,7 @@ Set on the `registry-lite-ui` service. The full set is `Config` in `app/server.p
 | Optional | `UI_ENVIRONMENTS` | `dev,test,uat,staging,prod` | Stage prefixes, in order, offered as promote shortcuts in Copy to and Move to. |
 | Optional | `UI_REGISTRY_STORAGE` | empty | Host path or volume of the registry data, shown in the garbage collection commands in Help. |
 | Optional | `UI_POLL_INTERVAL`, `UI_MAX_EVENTS`, `UI_MAX_EVENT_DAYS` | `30`, `1000`, `30` | Seconds between registry walks, and the Recent history caps. |
+| Optional | `UI_POLL_BURST`, `UI_POLL_BURST_MAX` | `5`, `600` | While a push has uploaded layers but not its manifest (the repository is listed, its tags answer 404), walk every `UI_POLL_BURST` seconds instead, for at most `UI_POLL_BURST_MAX` seconds from when it was first seen. `0` turns it off. A new tag in a repository that already has tags shows at the next normal walk. |
 | When the registry has basic auth | `REGISTRY_USER`, `REGISTRY_PASSWORD_FILE` | empty | Registry credentials. See `compose.registry-auth.yml`. |
 | When the registry is HTTPS | `REGISTRY_CA_FILE` | system store | CA bundle (or the self-signed certificate) for `REGISTRY_URL`. Verification never turns off. |
 | When the UI serves HTTPS | `UI_TLS_CERT`, `UI_TLS_KEY` | empty | Certificate and key for the UI listener, TLS 1.2+. |

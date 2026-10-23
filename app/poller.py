@@ -212,16 +212,30 @@ class State:
 
 
 class Poller(threading.Thread):
-    """Walks catalog and tags every `interval` seconds, at most `max_tags` tags per cycle, resuming where it stopped."""
-    def __init__(self, client, state, interval=30, max_tags=500):
+    """Walks catalog and tags every `interval` seconds, at most `max_tags` tags per cycle, resuming where it stopped.
+    A push uploads its layers before its manifest, and between the two the catalog lists a new repository while its tag
+    list answers 404. While one waits like that, the walk runs every `burst` seconds, for at most `burst_max` seconds
+    after it was first seen, so its tags show within seconds of the manifest. burst 0 turns this off."""
+    def __init__(self, client, state, interval=30, max_tags=500, burst=5, burst_max=600):
         super().__init__(daemon=True, name="poller")
         self.client, self.state, self.interval, self.max_tags = client, state, interval, max_tags
+        self.burst, self.burst_max = burst, burst_max
         self.cursor, self.covered, self.stop, self.kick = "", set(), threading.Event(), threading.Event()
         self.partial = ("", {})  # a repository larger than the budget, with the tags checked so far
         self.throttle, self.last_tick = Throttle(), time.monotonic()
+        self.pending = {}  # repository in the catalog whose tag list is 404 (a push in progress) -> when first seen
 
     def healthy(self):
         return time.monotonic() - self.last_tick < 3 * max(self.interval, 300)
+
+    def wait_for(self, fails):
+        """Seconds to the next cycle: the interval, backing off on failure, shorter while a push is in progress.
+        A failing registry always backs off, burst or not."""
+        wait = min(self.interval * 2 ** min(fails, 8), 300)
+        now = time.monotonic()
+        if self.burst > 0 and not fails and any(now - t < self.burst_max for t in self.pending.values()):
+            wait = min(wait, self.burst)
+        return wait
 
     def wake(self):
         self.kick.set()
@@ -265,6 +279,7 @@ class Poller(threading.Thread):
         repos = sorted(self.client.catalog())
         order = [r for r in repos if r > self.cursor] + [r for r in repos if r <= self.cursor]
         scanned, observed, budget = set(), {}, self.max_tags
+        pending = set()
         for r in order:
             if budget <= 0:
                 break
@@ -273,6 +288,8 @@ class Poller(threading.Thread):
             except Exception as e:  # a repo deleted mid-walk, or one bad tag: skip it this cycle, but a dead registry aborts
                 if getattr(e, "status", 0) not in (404, 400):
                     raise
+                if e.status == 404:
+                    pending.add(r)
                 self.throttle.error(f"skip {r}", f"skipping {r}: {getattr(e, 'message', e)}")
                 self.partial = ("", {})
                 continue
@@ -282,6 +299,8 @@ class Poller(threading.Thread):
             observed.update(found)
             scanned.add(r)
             self.cursor = r
+        now = time.monotonic()
+        self.pending = {r: self.pending.get(r, now) for r in pending}
         gone = {k.rsplit(":", 1)[0] for k in self.state.tags} - set(repos)
         self.state.update(scanned, observed, gone)
         if not self.state.baselined:
@@ -304,5 +323,5 @@ class Poller(threading.Thread):
             except Exception as e:
                 self.throttle.error("state", f"state save failed: {e}")
             self.last_tick = time.monotonic()
-            self.kick.wait(min(self.interval * 2 ** min(fails, 8), 300))
+            self.kick.wait(self.wait_for(fails))
             self.kick.clear()
