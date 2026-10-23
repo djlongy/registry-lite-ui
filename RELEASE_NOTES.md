@@ -4,6 +4,13 @@ registry-lite-ui is a web UI for a plain `registry:2` that browses, copies, move
 
 `podman-compose up -d` with `compose.yml` (registry and UI), or `podman-compose -f compose.ui.yml up -d` with `REGISTRY_URL` set for a registry that already runs. `docker compose` works the same way. Pin `UI_IMAGE` to a version or a digest in your `.env`.
 
+## Changes in 0.2.2
+
+- Fixed: on an SELinux host, podman-compose mounted `secrets/gitlab_token` and `secrets/registry_password` without a label, so a token file under a home directory stopped the UI at start (`Permission denied: '/run/secrets/gitlab_token'`). `compose.pypi.yml` and `compose.registry-auth.yml` now bind-mount the file with `:ro,z`.
+- A 401 from GitLab now says that a deploy token is refused by the packages API, and names the token types that work: a personal, group or project access token with `read_api`.
+- A group that GitLab cannot find now points to the project form of `PYPI_INDEX_URL`, for a project path given as `GITLAB_GROUP`.
+- The README says that the overrides add to the service `registry-lite-ui`: rename the container with `container_name`, not the service.
+
 ## Changes in 0.2.1
 
 - The image is `ghcr.io/newen-systems/registry-lite-ui`. Images up to 0.2.0 stay at `ghcr.io/djlongy/registry-lite-ui`.

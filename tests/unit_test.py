@@ -904,6 +904,16 @@ class PypiSource(unittest.TestCase):
         self.assertIn("token", e.exception.message)
         self.assertEqual(len(cfg.pypi.catalog.snapshot()["packages"]), 249)  # the last list stays
 
+    def test_errors_say_what_to_fix(self):
+        c = G.Client(self.base, "a-deploy-token")  # GitLab answers a deploy token 401 on the REST API, as for no token
+        with self.assertRaises(G.GitLabError) as e:
+            c.scope("project", "7")
+        self.assertIn("deploy token", e.exception.message)
+        c = G.Client(self.base, TOKEN)
+        with self.assertRaises(G.GitLabError) as e:  # a project path given where a group is expected
+            c.scope("group", "grp/p7")
+        self.assertIn("/api/v4/projects/<id or path>/packages/pypi/simple", e.exception.message)
+
     def test_config_is_checked(self):
         bad_urls = ("g.example", f"{self.base}/api/v4/groups/grp/packages/pypi/simple", f"{self.base}/api/v4/projects/7/-/packages/pypi/simple",
                     f"{self.base}/api/v4/users/7/packages/pypi/simple", "javascript:alert(1)")

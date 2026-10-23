@@ -65,7 +65,10 @@ class Client:
         try:
             r = urllib.request.urlopen(req, timeout=self.timeout, context=self.ctx)
         except urllib.error.HTTPError as e:
-            hint = {401: ": the token is missing, expired or revoked", 403: ": the token lacks read_api or access to this group",
+            # A deploy token reads the PyPI index but not the REST API, which answers it 401 as for no token at all.
+            hint = {401: ": the token is missing, expired or revoked, or is a deploy token, which the packages API refuses."
+                         " Use a personal, group or project access token with read_api",
+                    403: ": the token lacks read_api or access to this group or project",
                     404: ": not found, or the token cannot see it"}.get(e.code, "")
             raise GitLabError(e.code, f"GitLab answered {e.code} for {path.split('?')[0]}{hint}") from None
         except (urllib.error.URLError, OSError) as e:
@@ -107,7 +110,12 @@ class Client:
     def scope(self, kind, ref):
         """The group or project the index belongs to: {kind, id, path}."""
         key = "full_path" if kind == "group" else "path_with_namespace"
-        g = self.get(f"/{kind}s/" + urllib.parse.quote(str(ref), safe=""))
+        try:
+            g = self.get(f"/{kind}s/" + urllib.parse.quote(str(ref), safe=""))
+        except GitLabError as e:
+            if e.status == 404 and kind == "group":  # often a project path given as GITLAB_GROUP or in a group index URL
+                e.message += ". For one project's packages, PYPI_INDEX_URL takes https://<gitlab>/api/v4/projects/<id or path>/packages/pypi/simple"
+            raise
         if not (isinstance(g, dict) and isinstance(g.get("id"), int) and isinstance(g.get(key), str)):
             raise GitLabError(502, f"GitLab sent a {kind} without id or {key}")
         return {"kind": kind, "id": g["id"], "path": g[key]}

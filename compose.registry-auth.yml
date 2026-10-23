@@ -4,7 +4,6 @@ services:
     environment:
       REGISTRY_USER: ${REGISTRY_USER:?set REGISTRY_USER}
       REGISTRY_PASSWORD_FILE: /run/secrets/registry_password
-    secrets: [registry_password]
-secrets:
-  registry_password:
-    file: ./secrets/registry_password
+    # A bind mount, not a compose secret: podman-compose mounts secrets without an SELinux label. `z` relabels it.
+    volumes:
+      - ./secrets/registry_password:/run/secrets/registry_password:ro,z

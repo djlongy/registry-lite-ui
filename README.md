@@ -33,7 +33,7 @@ Set on the `registry-lite-ui` service. The full set is `Config` in `app/server.p
 | When the registry is HTTPS | `REGISTRY_CA_FILE` | system store | CA bundle (or the self-signed certificate) for `REGISTRY_URL`. Verification never turns off. |
 | When the UI serves HTTPS | `UI_TLS_CERT`, `UI_TLS_KEY` | empty | Certificate and key for the UI listener, TLS 1.2+. |
 | When PyPI is on | `PYPI_INDEX_URL` | none | The index pip is given: `https://<gitlab>/api/v4/groups/<id or path>/-/packages/pypi/simple` or `.../projects/<id or path>/packages/pypi/simple`. |
-| When PyPI is on | `secrets/gitlab_token` | none | A token with `read_api`, never sent to the browser. Leave the file empty for a public index. |
+| When PyPI is on | `secrets/gitlab_token` | none | A personal, group or project access token with `read_api`, never sent to the browser. A deploy token does not work: GitLab answers it 401 on the packages API. Leave the file empty for a public index. |
 | Optional | `UI_PYPI_PUBLIC_URL` | base of `PYPI_INDEX_URL` | The GitLab address pip users type, when it differs. |
 | Optional | `UI_PYPI_PUBLIC` | `false` | Behind `compose.oidc.yml`, PyPI needs a login unless this is `true`. |
 
@@ -89,6 +89,7 @@ Add each with `-f`, after `compose.yml` (or after `compose.ui.yml` for a registr
 ## Preconditions
 
 - Files the containers read (keys, certificates, `secrets/*`, a host `/data/registry`) belong to uid 65534: `chown -R 65534:65534 <dirs>`, or `podman unshare chown` for rootless podman. Mount shared directories with `:z` under SELinux.
+- The overrides add to the service named `registry-lite-ui`. Renaming that service leaves the override as a second service without an image, and compose refuses to start (`has neither an image nor a build context`). To name the container, keep the service and set `container_name` in your own override file.
 - The OIDC issuer sends `email` with `email_verified` true, and a `groups` claim when `OIDC_ALLOWED_GROUPS` is set.
 - The PyPI token's user can read the group or project, or the index is public and the token file is empty.
 
