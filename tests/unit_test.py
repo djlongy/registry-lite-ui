@@ -393,6 +393,59 @@ class PollerTests(unittest.TestCase):
         st.save(force=True)
         self.assertEqual(P.State(os.path.join(d, "state.json"), clock=Clock()).traits(D("1")), {"index": False, "kind": "helm"})
 
+    def test_push_in_progress_polls_in_bursts(self):
+        class Reg(FakeRegistry):
+            def tags(self, r):
+                if r not in self.repos:  # in the catalog with layers only: the tag list is 404 until the manifest
+                    raise R.RegistryError(404, "registry said 404 NAME_UNKNOWN")
+                return super().tags(r)
+
+            def catalog(self):
+                return [*self.repos, "pushing"]
+        reg = Reg({"a": {"1": "d1"}})
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st, interval=60, burst=5, burst_max=600)
+        self.assertEqual(p.wait_for(0), 60)
+        p.cycle()
+        self.assertTrue(st.baselined)  # a repository that cannot be read does not hold off the first full pass, or no event ever fires
+        self.assertEqual((set(p.pending), p.wait_for(0)), ({"pushing"}, 5))
+        self.assertEqual(p.wait_for(1), 120)  # a failing registry backs off, burst or not
+        first = p.pending["pushing"]
+        p.cycle()
+        self.assertEqual(p.pending["pushing"], first)  # the burst window runs from when the push was first seen
+        p.pending["pushing"] -= 599
+        self.assertEqual(p.wait_for(0), 5)
+        p.pending["pushing"] -= 1  # a push that never finished goes back to the interval
+        self.assertEqual(p.wait_for(0), 60)
+        p.pending["pushing"] = first
+        p.burst = 0  # UI_POLL_BURST=0 turns it off
+        self.assertEqual(p.wait_for(0), 60)
+        reg.repos["pushing"] = {"1": "d2"}
+        p.cycle()
+        self.assertEqual(p.pending, {})
+        p.pushing("other")  # opened in the UI before the walk saw it: the burst starts now
+        self.assertTrue(p.kick.is_set())
+        p.kick.clear()
+        p.pushing("other")  # asked again: no extra walk
+        self.assertFalse(p.kick.is_set())
+
+    def test_burst_window_survives_a_cycle_that_stops_early(self):
+        class Reg(FakeRegistry):
+            def tags(self, r):
+                if r == "z-pushing":
+                    raise R.RegistryError(404, "registry said 404 NAME_UNKNOWN")
+                return super().tags(r)
+
+            def catalog(self):
+                return [*self.repos, "z-pushing"]
+        reg = Reg({f"r{i}": {"t": f"d{i}"} for i in range(4)})
+        p = P.Poller(reg, P.State(clock=Clock()), max_tags=100)
+        p.cycle()
+        first = p.pending["z-pushing"]
+        p.max_tags = 2  # the budget runs out before the walk reaches z-pushing
+        p.cycle()
+        self.assertEqual(p.pending, {"z-pushing": first})  # kept with its first-seen time, so UI_POLL_BURST_MAX still bounds it
+
     def test_poller_survives_errors(self):
         class Down(FakeRegistry):
             def catalog(self):
@@ -1105,6 +1158,15 @@ class Routes(unittest.TestCase):
         self.assertEqual(self.get["/api/tags"]({"repo": ["a/app"]})[0]["kind"], "image")
         with self.assertRaises(R.RegistryError):
             self.get["/api/tags"]({})
+        with self.assertRaises(ValueError):
+            S.Config({"UI_POLL_BURST": "-1"})
+        def pushing(repo):
+            raise R.RegistryError(404, "registry said 404 NAME_UNKNOWN: repository name not known to registry")
+        self.cfg.client.tags = pushing  # layers uploaded, manifest not yet
+        with self.assertRaises(R.RegistryError) as e:
+            self.get["/api/tags"]({"repo": ["a/app"]})
+        self.assertEqual(e.exception.status, 404)
+        self.assertIn("push in progress", e.exception.message)
         self.assertEqual(self.get["/api/recent"]({"limit": ["-5"]})["events"], [])
         self.assertTrue(self.get["/api/config"]({})["deleteEnabled"])
         # the pull host: the explicit setting, else the host:port of REGISTRY_URL

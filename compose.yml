@@ -41,6 +41,8 @@ services:
       UI_ENVIRONMENTS: "${UI_ENVIRONMENTS:-}"
       UI_REGISTRY_STORAGE: "${UI_REGISTRY_STORAGE:-}"
       UI_POLL_INTERVAL: "${UI_POLL_INTERVAL:-30}"
+      UI_POLL_BURST: "${UI_POLL_BURST:-5}"
+      UI_POLL_BURST_MAX: "${UI_POLL_BURST_MAX:-600}"
       UI_STATE_DIR: /state
       UI_MAX_EVENTS: "${UI_MAX_EVENTS:-1000}"
     volumes: [ui-state:/state]

@@ -4,6 +4,16 @@ registry-lite-ui is a web UI for a plain `registry:2` that browses, copies, move
 
 `podman-compose up -d` with `compose.yml` (registry and UI), or `podman-compose -f compose.ui.yml up -d` with `REGISTRY_URL` set for a registry that already runs. `docker compose` works the same way. Pin `UI_IMAGE` to a version or a digest in your `.env`.
 
+## Changes in 0.2.3
+
+- Fixed: changing the default sort in Settings did not reorder the PyPI packages in the tree until something was clicked. It now applies at once.
+- A push in progress no longer shows as a 404. The registry lists a new repository once its first layer is uploaded, and its tags answer 404 until the manifest comes. The UI now says no tags yet, walks the registry every `UI_POLL_BURST` seconds (5) while such a repository waits, for at most `UI_POLL_BURST_MAX` seconds (600), and loads its tags as soon as they exist. `UI_POLL_BURST=0` turns this off.
+- A failing registry backs off as before, also during a burst.
+- Opening a repository whose push is still in progress starts the burst at once, instead of at the next walk. It shows the no-tags-yet message only, without the advice to delete an empty repository.
+- Fixed: one repository the registry lists but cannot read (a push that never finished) stopped the first full walk from completing on a fresh state, so Recent and live updates never started.
+- Fixed: a forced tag reload while an earlier read was still in flight returned that earlier answer.
+- The release workflow publishes one run at a time per commit, so a tag pushed on the head of main no longer races the main run.
+
 ## Changes in 0.2.2
 
 - Fixed: on an SELinux host, podman-compose mounted `secrets/gitlab_token` and `secrets/registry_password` without a label, so a token file under a home directory stopped the UI at start (`Permission denied: '/run/secrets/gitlab_token'`). `compose.pypi.yml` and `compose.registry-auth.yml` now bind-mount the file with `:ro,z`.

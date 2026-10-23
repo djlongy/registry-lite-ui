@@ -80,6 +80,9 @@ class Config:
         self.csrf = hmac.new(secrets.token_bytes(32), b"csrf", hashlib.sha256).hexdigest()
         n = lambda key, default: int(env.get(key, default))  # noqa: E731
         self.max_conn, self.interval, self.max_tags = n("UI_MAX_CONN", 64), n("UI_POLL_INTERVAL", 30), n("UI_POLL_MAX_TAGS", 500)
+        self.burst, self.burst_max = n("UI_POLL_BURST", 5), n("UI_POLL_BURST_MAX", 600)  # see poller.Poller
+        if self.burst < 0 or self.burst_max < 0:
+            raise ValueError("UI_POLL_BURST and UI_POLL_BURST_MAX must be 0 or more seconds")
         self.sse_slots = threading.BoundedSemaphore(n("UI_MAX_SSE", 20))
         state_dir = env.get("UI_STATE_DIR")
         self.state = P.State(os.path.join(state_dir, "state.json") if state_dir else None, n("UI_MAX_EVENTS", 1000),
@@ -207,7 +210,16 @@ def routes(cfg):
     def tags(q):
         repo = one(q, "repo")
         rows = []
-        for t in sorted(c.tags(repo)):
+        try:
+            names = sorted(c.tags(repo))
+        except R.RegistryError as e:
+            if e.status == 404:  # the catalog lists a repository as soon as a push has uploaded a layer, before its manifest
+                if cfg.poller and repo in c.catalog():
+                    cfg.poller.pushing(repo)
+                raise R.RegistryError(404, "No tags yet: the registry has layers for this repository but no manifest. "
+                                           "A push in progress shows its tags when it finishes.") from None
+            raise
+        for t in names:
             _, mtype, digest = c.manifest(repo, t, head=True)
             row = {"tag": t, "digest": digest, "changed": cfg.state.tags.get(f"{repo}:{t}", {}).get("changed"), "index": mtype in R.INDEX_TYPES}
             kind = cfg.state.traits(digest).get("kind")  # null until the poller has read the manifest
@@ -493,7 +505,7 @@ def main(env):
     if cert:
         # handshake in the worker thread, so a stalled client cannot block accept()
         httpd.socket = server_context(cert, key).wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
-    cfg.poller = P.Poller(cfg.client, cfg.state, cfg.interval, cfg.max_tags)
+    cfg.poller = P.Poller(cfg.client, cfg.state, cfg.interval, cfg.max_tags, cfg.burst, cfg.burst_max)
     cfg.poller.start()
     if cfg.pypi:
         cfg.pypi.poller.start()

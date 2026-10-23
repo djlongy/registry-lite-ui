@@ -301,7 +301,7 @@ function flash(n) {
 }
 function ensureTags(n, force) {
   if (n.fresh && !force) return Promise.resolve();
-  if (n.loading) return n.loading;
+  if (n.loading) return force ? n.loading.then(() => ensureTags(n, true)) : n.loading; // a forced reload must not take an answer read before the change
   n.loading = api("/api/tags?repo=" + encodeURIComponent(n.path)).then((rows) => {
     const first = !n.tagList.length && !n.tagMap.size;
     reconcileTags(n, rows, !first);
@@ -1037,7 +1037,7 @@ function emptyRepoNote(n) {
   return [note, codeBlock("Remove the empty repository (registry stopped)", [rmRepoCommand(n.path)]), ...storageHint()];
 }
 function repoPane(n) {
-  const tags = n.tagList.length ? tagsList(n) : emptyRepoNote(n);
+  const tags = n.tagList.length ? tagsList(n) : n.err ? [] : emptyRepoNote(n); // an error (no tags yet, during a push) is not an empty repository to remove
   const kids = visibleKids(n).length ? [el("h3", { textContent: "Folders" }), ...childrenList(n)] : [];
   showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("folderOpen")), n.path), el("p", { className: "reporef" }, copyValue(`${cfg.registryHost || "<REGISTRY>"}/${n.path}`, "Copy repository reference")),
     ...(n.err ? [el("p", { className: "mut", textContent: n.err })] : []), ...tags, ...kids, commandsEl(n.path, "", "", repoKind(n)));
@@ -1238,7 +1238,8 @@ function refreshTouched(touched, gap) { // reload the tags of every changed repo
   for (const n of tree.byPath.values()) {
     if (!n.repo || !(gap || touched.has(n.path))) continue;
     dropManifests(n.path);
-    if (n.tagList.length || n.loading) jobs.push(ensureTags(Object.assign(n, { fresh: false }), true)); // reconciling flashes what changed
+    // reconciling flashes what changed. A repository that answered an error (no tags yet, during a push) loads again too.
+    if (n.tagList.length || n.loading || n.err) jobs.push(ensureTags(Object.assign(n, { fresh: false }), true));
     else flash(n);
   }
   return Promise.all(jobs);
@@ -1693,6 +1694,7 @@ function applyPrefs(change) { // save a change and do what it needs, at once
   if (prefs.live !== before.live) startLive();
   if (prefs.interval !== before.interval) startPoll();
   if (prefs.showEmpty !== before.showEmpty || prefs.show !== before.show) { resetHidden(); renderTree(); drawTypes(); }
+  if (prefs.sort !== before.sort) renderTree(); // the PyPI packages in the tree follow the sort too
   if (prefs.runtime !== before.runtime || prefs.tool !== before.tool || prefs.os !== before.os || prefs.show !== before.show || prefs.sort !== before.sort || prefs.pageSize !== before.pageSize || prefs.showEmpty !== before.showEmpty) { resetShown(); void renderPane(true); }
 }
 function settings() {
