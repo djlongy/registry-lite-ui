@@ -214,6 +214,8 @@ def routes(cfg):
             names = sorted(c.tags(repo))
         except R.RegistryError as e:
             if e.status == 404:  # the catalog lists a repository as soon as a push has uploaded a layer, before its manifest
+                if cfg.poller and repo in c.catalog():
+                    cfg.poller.pushing(repo)
                 raise R.RegistryError(404, "No tags yet: the registry has layers for this repository but no manifest. "
                                            "A push in progress shows its tags when it finishes.") from None
             raise

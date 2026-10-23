@@ -301,7 +301,7 @@ function flash(n) {
 }
 function ensureTags(n, force) {
   if (n.fresh && !force) return Promise.resolve();
-  if (n.loading) return n.loading;
+  if (n.loading) return force ? n.loading.then(() => ensureTags(n, true)) : n.loading; // a forced reload must not take an answer read before the change
   n.loading = api("/api/tags?repo=" + encodeURIComponent(n.path)).then((rows) => {
     const first = !n.tagList.length && !n.tagMap.size;
     reconcileTags(n, rows, !first);
@@ -1037,7 +1037,7 @@ function emptyRepoNote(n) {
   return [note, codeBlock("Remove the empty repository (registry stopped)", [rmRepoCommand(n.path)]), ...storageHint()];
 }
 function repoPane(n) {
-  const tags = n.tagList.length ? tagsList(n) : emptyRepoNote(n);
+  const tags = n.tagList.length ? tagsList(n) : n.err ? [] : emptyRepoNote(n); // an error (no tags yet, during a push) is not an empty repository to remove
   const kids = visibleKids(n).length ? [el("h3", { textContent: "Folders" }), ...childrenList(n)] : [];
   showMain(crumbs(n), el("h2", {}, el("span", { className: "ico" }, icon("folderOpen")), n.path), el("p", { className: "reporef" }, copyValue(`${cfg.registryHost || "<REGISTRY>"}/${n.path}`, "Copy repository reference")),
     ...(n.err ? [el("p", { className: "mut", textContent: n.err })] : []), ...tags, ...kids, commandsEl(n.path, "", "", repoKind(n)));

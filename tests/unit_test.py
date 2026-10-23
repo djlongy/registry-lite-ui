@@ -403,9 +403,11 @@ class PollerTests(unittest.TestCase):
             def catalog(self):
                 return [*self.repos, "pushing"]
         reg = Reg({"a": {"1": "d1"}})
-        p = P.Poller(reg, P.State(clock=Clock()), interval=60, burst=5, burst_max=600)
+        st = P.State(clock=Clock())
+        p = P.Poller(reg, st, interval=60, burst=5, burst_max=600)
         self.assertEqual(p.wait_for(0), 60)
         p.cycle()
+        self.assertTrue(st.baselined)  # a repository that cannot be read does not hold off the first full pass, or no event ever fires
         self.assertEqual((set(p.pending), p.wait_for(0)), ({"pushing"}, 5))
         self.assertEqual(p.wait_for(1), 120)  # a failing registry backs off, burst or not
         first = p.pending["pushing"]
@@ -421,6 +423,28 @@ class PollerTests(unittest.TestCase):
         reg.repos["pushing"] = {"1": "d2"}
         p.cycle()
         self.assertEqual(p.pending, {})
+        p.pushing("other")  # opened in the UI before the walk saw it: the burst starts now
+        self.assertTrue(p.kick.is_set())
+        p.kick.clear()
+        p.pushing("other")  # asked again: no extra walk
+        self.assertFalse(p.kick.is_set())
+
+    def test_burst_window_survives_a_cycle_that_stops_early(self):
+        class Reg(FakeRegistry):
+            def tags(self, r):
+                if r == "z-pushing":
+                    raise R.RegistryError(404, "registry said 404 NAME_UNKNOWN")
+                return super().tags(r)
+
+            def catalog(self):
+                return [*self.repos, "z-pushing"]
+        reg = Reg({f"r{i}": {"t": f"d{i}"} for i in range(4)})
+        p = P.Poller(reg, P.State(clock=Clock()), max_tags=100)
+        p.cycle()
+        first = p.pending["z-pushing"]
+        p.max_tags = 2  # the budget runs out before the walk reaches z-pushing
+        p.cycle()
+        self.assertEqual(p.pending, {"z-pushing": first})  # kept with its first-seen time, so UI_POLL_BURST_MAX still bounds it
 
     def test_poller_survives_errors(self):
         class Down(FakeRegistry):

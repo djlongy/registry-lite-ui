@@ -228,6 +228,13 @@ class Poller(threading.Thread):
     def healthy(self):
         return time.monotonic() - self.last_tick < 3 * max(self.interval, 300)
 
+    def pushing(self, repo):
+        """A tags request answered 404 for a listed repository: start the burst now, not at the next walk.
+        Only a repository not yet known wakes the walk, so repeated requests cannot drive it faster than the burst."""
+        if repo not in self.pending:
+            self.pending[repo] = time.monotonic()
+            self.wake()
+
     def wait_for(self, fails):
         """Seconds to the next cycle: the interval, backing off on failure, shorter while a push is in progress.
         A failing registry always backs off, burst or not."""
@@ -279,7 +286,7 @@ class Poller(threading.Thread):
         repos = sorted(self.client.catalog())
         order = [r for r in repos if r > self.cursor] + [r for r in repos if r <= self.cursor]
         scanned, observed, budget = set(), {}, self.max_tags
-        pending = set()
+        pending, skipped = set(), set()
         for r in order:
             if budget <= 0:
                 break
@@ -288,6 +295,7 @@ class Poller(threading.Thread):
             except Exception as e:  # a repo deleted mid-walk, or one bad tag: skip it this cycle, but a dead registry aborts
                 if getattr(e, "status", 0) not in (404, 400):
                     raise
+                skipped.add(r)
                 if e.status == 404:
                     pending.add(r)
                 self.throttle.error(f"skip {r}", f"skipping {r}: {getattr(e, 'message', e)}")
@@ -299,12 +307,15 @@ class Poller(threading.Thread):
             observed.update(found)
             scanned.add(r)
             self.cursor = r
+        # A waiting repository this cycle did not reach (its budget ran out first) keeps its first-seen time, so
+        # burst_max still bounds the burst.
         now = time.monotonic()
-        self.pending = {r: self.pending.get(r, now) for r in pending}
+        kept = (set(self.pending) & set(repos)) - scanned - skipped
+        self.pending = {r: self.pending.get(r, now) for r in pending | kept}
         gone = {k.rsplit(":", 1)[0] for k in self.state.tags} - set(repos)
         self.state.update(scanned, observed, gone)
         if not self.state.baselined:
-            self.covered |= scanned
+            self.covered |= scanned | skipped  # a repository that cannot be read (a push that never finished) must not hold off the baseline
             if self.covered >= set(repos):
                 self.state.mark_baselined()
 
